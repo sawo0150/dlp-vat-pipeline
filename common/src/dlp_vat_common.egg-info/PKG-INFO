@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: dlp-vat-common
-Version: 0.1.0
-Summary: Common utilities and dataset schema for DLP vat pipeline + ML
-Requires-Python: >=3.10
-Requires-Dist: pydantic
-Requires-Dist: pyyaml
-Requires-Dist: pandas

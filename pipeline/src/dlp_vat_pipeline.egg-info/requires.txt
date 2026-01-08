@@ -1,9 +1,0 @@
-hydra-core
-omegaconf
-numpy
-pandas
-pillow
-tqdm
-pyyaml
-opencv-python
-scikit-image

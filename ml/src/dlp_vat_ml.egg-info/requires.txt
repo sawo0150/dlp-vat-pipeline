@@ -1,5 +1,0 @@
-hydra-core
-omegaconf
-numpy
-pandas
-tqdm

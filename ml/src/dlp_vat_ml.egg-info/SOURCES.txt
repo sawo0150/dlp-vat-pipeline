@@ -1,8 +1,0 @@
-pyproject.toml
-src/dlp_ml/__init__.py
-src/dlp_ml/train.py
-src/dlp_vat_ml.egg-info/PKG-INFO
-src/dlp_vat_ml.egg-info/SOURCES.txt
-src/dlp_vat_ml.egg-info/dependency_links.txt
-src/dlp_vat_ml.egg-info/requires.txt
-src/dlp_vat_ml.egg-info/top_level.txt

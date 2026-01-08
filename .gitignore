@@ -12,3 +12,8 @@ datasets/
 
 # notebooks
 **/.ipynb_checkpoints/
+
+# 빌드/설치 시 자동 생성물
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
