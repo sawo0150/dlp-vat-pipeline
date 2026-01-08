@@ -1,3 +1,5 @@
+# configs/task/preprocess.yaml
+
 name: preprocess
 registration: true
 threshold_mode: random_gray # binary | random_gray (S5 방식)

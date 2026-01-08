@@ -1,0 +1,49 @@
+# configs/preprocess/standard.yaml
+
+# 1. Camera Image 처리 설정 (S3 Logic)
+camera:
+  target_size: 1280        # 최종 출력 크기
+  
+  # 이미지 방향 보정 옵션 (180도 돌아가면 vflip, hflip 둘 다 true로 해보세요)
+  transpose: false          # 행/열 교환 (MATLAB의 .')
+  vflip: false             # 상하 반전 (Vertical Flip)
+  hflip: false             # 좌우 반전 (Horizontal Flip) - 필요시 true로 변경
+  
+  # Affine Transformation
+  rotation: -1.1           # 각도 (degree)
+  scale: 0.8016            # (8 / 9.98) MATLAB 코드 참조
+  
+  # Padding (MATLAB: padarray)
+  pad_size: 256            # 상하좌우 패딩 픽셀
+  
+  # Crop (MATLAB: imcrop [xmin ymin width height] 1-based)
+  # Python은 0-based이므로 x, y에서 1씩 빼야 함.
+  # 예: MATLAB [267 286 1279 1279] -> Python x=266, y=285, w=1280, h=1280
+  crop:
+    x: 266
+    y: 285
+    w: 1280
+    h: 1280
+    
+# 2. Mask Image 처리 설정 (S4 Logic)
+mask:
+  target_size: 1280
+  
+  # S4 로직: upscale 후 padding
+  # 128px 입력 기준 설정
+  upscale_factor: 10       # 128 * 10 = 1280 (딱 맞음)
+  padding: 0               # 필요 시 설정
+
+# 3. ML Dataset Split 설정
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  shuffle: true
+
+# [추가] 4. 출력 폴더/파일 네이밍 설정 (확장성 고려)
+naming:
+  process_name: "standard"        # 이 전처리 설정의 이름 (폴더명에 붙음)
+  input_folder: "digital_mask"    # 기존 A 폴더의 이름 (예: digital_mask)
+  target_folder: "light_dist"     # 기존 B 폴더의 이름 (예: light_dist)
+  descriptive_files: true         # 파일명에 split, type 정보를 포함할지 여부

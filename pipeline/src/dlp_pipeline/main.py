@@ -1,3 +1,4 @@
+# dlp-vat-pipeline/pipeline/src/dlp_pipeline/main.py
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import logging
@@ -7,7 +8,8 @@ from tqdm import tqdm
 from dlp_pipeline.dataset import DatasetManager
 from dlp_pipeline.generator import MaskGenerator
 from dlp_pipeline.projector_interface import ProjectorWindow
-from dlp_pipeline.preprocessor import ImagePreprocessor
+from dlp_pipeline.preprocessor import Preprocessor
+from dlp_pipeline.ingestor import DataIngestor
 from dlp_pipeline.utils import save_image
 
 log = logging.getLogger(__name__)
@@ -37,17 +39,20 @@ def run_generate(cfg, ds):
     
     count = cfg.task.num_images
     log.info(f"Generating {count} masks...")
-    
+
+    # 설정에서 사이즈 가져오기
+    gen_size = cfg.rig.mask.base_size # 보통 128
+
     samples = gen.generate_batch(count)
     manifest_data = []
 
     for idx, item in enumerate(tqdm(samples)):
-        sample_id = f"sample_{idx:04d}"
+        sample_id = f"sample_{idx:05d}"
         mask_name = f"{sample_id}_mask.png"
         win_name = f"{sample_id}_window.png"
         
         # Save Mask (128x128)
-        save_image(os.path.join(ds.dirs['mask_128'], mask_name), item['image'])
+        save_image(os.path.join(ds.dirs['mask_input'], mask_name), item['image'])
         
         # Process Window (1080p)
         win_img = proj.insert_mask(item['image'])
@@ -57,19 +62,22 @@ def run_generate(cfg, ds):
             "sample_id": sample_id,
             "mask_path": mask_name,
             "window_path": win_name,
-            "pattern_type": item['type']
+            "pattern_type": item['type'],
+            "mask_width": gen_size,
+            "mask_height": gen_size
         })
         
     ds.update_manifest(manifest_data)
     log.info("Generation Complete.")
 
 def run_ingest(cfg, ds):
-    log.info("Ingest Logic to be implemented (Copying camera files...)")
+    log.info("Starting Ingest Task...")
+    ingestor = DataIngestor(cfg, ds)
+    ingestor.run()
 
 def run_preprocess(cfg, ds):
-    log.info("Preprocess Logic (Running S3/S4 logic...)")
-    prep = ImagePreprocessor(cfg)
-    # 여기에 manifest 로드 후 Loop 돌면서 prep.process_camera_image() 호출 구현 예정
-
+    proc = Preprocessor(cfg, ds)
+    proc.run()
+    
 if __name__ == "__main__":
     main()

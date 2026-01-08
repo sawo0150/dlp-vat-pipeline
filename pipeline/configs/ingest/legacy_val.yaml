@@ -1,0 +1,16 @@
+# @package _global_
+
+ingest:
+  mode: "external"  # external: 외부 데이터 주입 | pipeline: 기존 manifest 기반
+  
+  # 사수님 데이터 경로 (Mask와 Camera가 별도로 존재)
+  mask_dir: "/home/wosasa/Desktop/25-1_UROP/전달한 사항들/소분/val"
+  camera_dir: "/home/wosasa/Desktop/25-1_UROP/전달한 사항들/소분/val4"
+  
+  # 파일 매칭 규칙
+  mask_ext: "*.png"
+  camera_ext: "*.png" 
+  
+  # 정렬 및 매칭 방식
+  # filename_match: 파일명(확장자 제외)이 같으면 같은 짝으로 간주 (9001.png <-> 9001.png)
+  match_strategy: "filename_stem"

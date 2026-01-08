@@ -1,22 +1,50 @@
+# config.yaml
+# ------------------------------------------------------------
+# Hydra 기반 파이프라인 설정 파일
+# - defaults 블록에서 어떤 하위 설정(task/rig/paths 등)을 조합할지 결정
+# - 실험/데이터셋 생성/전처리 로직을 "코드 수정 없이" yaml 교체로 바꾸는 목적
+# ------------------------------------------------------------
+
 defaults:
-  - _self_
-  - task: generate
-  - rig: rig_default
-  - generator: mix_default
-  - registration: ecc
-  - paths: local_labtop       # 경로 설정 : default | local_labtop
+  - _self_                  # 이 config.yaml 자체를 defaults 체인에 포함
+  - task: preprocess            # 실행할 작업 선택: generate | ingest | preprocess
+                            #   - generate: 마스크 생성 + projector window 이미지 생성
+                            #   - ingest:   카메라(raw bmp 등) 파일을 dataset으로 수집/정리(예정)
+                            #   - preprocess: 카메라 이미지 정합/크롭/리사이즈 등 전처리(예정)
+  - rig: rig_default        # 장비/시스템(프로젝터 해상도, 삽입 좌표, 카메라 전처리 파라미터 등)
+  - generator: mix_default  # 마스크 생성기 설정(패턴 비율, grid/stripe 파라미터 등)
+  - registration: ecc       # 이미지 정합 방식(예: ECC 기반 registration 등) - 사용/미사용은 코드에 따라
+  - paths: local_labtop     # 경로 프리셋 선택
+                            #   - dataset_root 같은 "외부 저장 폴더"를 환경별로 바꾸기 위함
+                            #   - 예: lab PC / 개인 노트북 / 서버 등
+  - ingest: legacy_val      # 여기서 사용할 ingest 설정을 선택 
+                            # (legacy_val | labview)
+  - preprocess: standard    # 전처리 파라미터 파일 로드 ( standard )
 
 hydra:
   run:
-    dir: .  # 실행 위치 기준 (로그 폴더 생성 방지)
-  output_subdir: null
+    dir: .                  # Hydra가 기본으로 만드는 실행 폴더(날짜/시간 디렉토리)를 만들지 않고
+                            # "현재 폴더에서 그대로 실행"하도록 설정
+  output_subdir: null       # Hydra가 만드는 .hydra/ 같은 서브폴더 생성을 비활성화
 
 dataset:
-  id_strategy: timestamp  # timestamp | manual
-  name: null              # null이면 자동 생성
-  save_intermediate: true # 중간 산출물 저장 여부
+  id_strategy: timestamp    # dataset 폴더명 생성 전략
+                            #   - timestamp: 실행 시각 기반으로 새 dataset 생성(덮어쓰기 방지)
+                            #   - manual:    name 값을 그대로 사용(고정 이름으로 관리)
+  name: null                # manual 전략일 때 쓸 dataset 이름
+                            #   - null이면 자동 생성(보통 timestamp)
+  save_intermediate: true   # interim(중간 산출물) 저장 여부
+                            #   - true:  전처리 결과/중간 결과를 디스크에 남김(디버깅/추적 유리)
+                            #   - false: 최종 산출물만 남기고 중간 파일 저장 최소화
+  load_id: "20260108_200636"             # 기존 데이터셋을 불러올 때 사용 (폴더명 입력, 예: null | "20260108_200533")
 
 debug:
-  enable: false
-  sample_every: 50
-  max_images: 200
+  enable: false             # 디버그 이미지/중간 산출물 저장을 켤지 여부
+                            #   - true면 interim/debug 등에 샘플을 저장
+  sample_every: 50          # 몇 장마다 1장씩 저장할지 (예: 50이면 0,50,100,...)
+                            #   - "모든 중간 결과를 다 저장할 필요 없음" 요구사항에 대응
+  max_images: 200           # 디버그로 저장할 최대 이미지 수(상한)
+                            #   - 데이터가 수만 장이어도 디스크 폭발 방지
+# 재현성 관련 (seed)
+seed: 1234
+deterministic: true

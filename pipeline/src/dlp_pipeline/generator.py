@@ -1,3 +1,4 @@
+# dlp-vat-pipeline/pipeline/src/dlp_pipeline/generator.py
 import numpy as np
 import cv2
 import random

@@ -1,0 +1,31 @@
+실험실
+- 오늘 - 복잡하고 시간 
+- DLP 프로젝터 <- input
+- ND filter
+- CMOS sensor -> output
+Labview software control
+
+코딩 - 컴퓨터
+
+Training model : CGAN (pix2pix)
+Data generation (mask 생성) :  
+Training datasets --> Data processing 
+Input : Digital mask (128x128)
+Output : Light distribution (1600x1600)
+최종 1280 x 1280 의 이미지 사이즈로 변경
+- Digital mask 8배 1024x1024 --> 남은 부분 padding
+- Light distribution - affine transformation ( 각도 보정, 크기 보정) + padding
+ 
+
+1. random 마스크 생성     !! S1 Step1
+2. 마스크를 window용으로 조정   !! S2 Step2
+3. 얻은 projection의 position 및 angle 조정   !! S3 Step3
+ - mode 2 : digital mask 샘플 이미지 하나와 light distribution 비교 정렬
+ - mode 1 : 모든 이미지에 대해 정렬된 이미지 생성
+4. 보정 전 마스크의 크기 padarray 및 scale 조정 코드 !! S4 Step5
+- mode 1 : 디지털 마스크 data processing, 8배 후 padding
+5. 이미지 threshold 적용
+S3 _ mode 5 : 대용량용 training data 생성용 ( random한 threshold value 할당)
+S5_2 mode 11 : 생성된 digtal mask를 binary하게 변경 (축소하는 과정에서 binarlize)
+
+

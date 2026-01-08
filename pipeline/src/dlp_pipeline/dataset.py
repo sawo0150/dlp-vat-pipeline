@@ -1,3 +1,4 @@
+# dlp-vat-pipeline/pipeline/src/dlp_pipeline/dataset.py
 import os
 import pandas as pd
 from datetime import datetime
@@ -10,23 +11,42 @@ class DatasetManager:
     def __init__(self, cfg):
         self.cfg = cfg
         self.root = cfg.paths.dataset_root
-        self.id = self._create_id()
-        self.path = ensure_dir(os.path.join(self.root, self.id))
+        self.id = self._determine_id()
+        self.path = os.path.join(self.root, self.id)
+
+        # [추가] 로드 모드일 때 폴더 유무 확인
+        if self.cfg.dataset.load_id and not os.path.exists(self.path):
+            raise FileNotFoundError(f"Dataset ID '{self.id}' not found in {self.root}")
+
+        self.path = ensure_dir(self.path)
         self.manifest_path = os.path.join(self.path, "manifest.csv")
-        self.manifest = pd.DataFrame()
+        
+        # [추가] Manifest 로드 (기존 파일이 있으면 읽어옴)
+        if os.path.exists(self.manifest_path):
+            self.manifest = pd.read_csv(self.manifest_path)
+            log.info(f"Loaded existing manifest with {len(self.manifest)} records.")
+        else:
+            self.manifest = pd.DataFrame()
+            if self.cfg.dataset.load_id:
+                log.warning("Loaded dataset folder but manifest.csv is missing!")
         
         # 기본 폴더 구조 생성
         self.dirs = {
-            "mask_128": ensure_dir(os.path.join(self.path, "raw", "mask_128")),
+            "mask_input": ensure_dir(os.path.join(self.path, "raw", "mask_input")),
             "window": ensure_dir(os.path.join(self.path, "raw", "window_1080p")),
             "camera_raw": ensure_dir(os.path.join(self.path, "raw", "camera_raw")),
             "processed": ensure_dir(os.path.join(self.path, "interim", "processed")),
             "debug": ensure_dir(os.path.join(self.path, "interim", "debug")),
-        }
+        }   
         
         log.info(f"Dataset initialized at: {self.path}")
+    def _determine_id(self):
+        # 1. 커맨드라인/Config에서 load_id가 지정되었으면 최우선 사용
+        if self.cfg.dataset.load_id:
+            log.info(f"Loading EXISTING Dataset ID: {self.cfg.dataset.load_id}")
+            return str(self.cfg.dataset.load_id)
 
-    def _create_id(self):
+        # 2. 아니면 새로 생성
         if self.cfg.dataset.name:
             return self.cfg.dataset.name
         # timestamp strategy
