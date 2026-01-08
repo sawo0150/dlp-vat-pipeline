@@ -1,0 +1,15 @@
+defaults:
+  - task: train
+
+task:
+  name: train
+
+data:
+  dataset_root: /data/dlp_datasets
+  dataset_id: null
+  manifest: manifest.csv
+
+train:
+  seed: 123
+  batch_size: 8
+  num_workers: 4

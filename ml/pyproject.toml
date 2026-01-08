@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dlp-vat-ml"
+version = "0.1.0"
+description = "ML training/inference for DLP vat photopolymerization"
+requires-python = ">=3.10"
+dependencies = [
+  "hydra-core",
+  "omegaconf",
+  "numpy",
+  "pandas",
+  "tqdm",
+  # ML stack (fill later)
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

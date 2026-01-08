@@ -1,0 +1,6 @@
+pyproject.toml
+src/dlp_vat_pipeline.egg-info/PKG-INFO
+src/dlp_vat_pipeline.egg-info/SOURCES.txt
+src/dlp_vat_pipeline.egg-info/dependency_links.txt
+src/dlp_vat_pipeline.egg-info/requires.txt
+src/dlp_vat_pipeline.egg-info/top_level.txt

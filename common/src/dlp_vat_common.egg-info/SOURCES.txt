@@ -1,0 +1,6 @@
+pyproject.toml
+src/dlp_vat_common.egg-info/PKG-INFO
+src/dlp_vat_common.egg-info/SOURCES.txt
+src/dlp_vat_common.egg-info/dependency_links.txt
+src/dlp_vat_common.egg-info/requires.txt
+src/dlp_vat_common.egg-info/top_level.txt

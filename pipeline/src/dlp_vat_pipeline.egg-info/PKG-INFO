@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: dlp-vat-pipeline
+Version: 0.1.0
+Summary: DLP vat photopolymerization data processing pipeline
+Requires-Python: >=3.10
+Requires-Dist: hydra-core
+Requires-Dist: omegaconf
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: pillow
+Requires-Dist: tqdm
+Requires-Dist: pyyaml
+Requires-Dist: opencv-python
+Requires-Dist: scikit-image

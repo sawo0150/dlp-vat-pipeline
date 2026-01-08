@@ -1,0 +1,14 @@
+
+# datasets & artifacts
+/data/
+datasets/
+*.ckpt
+*.pt
+*.pth
+
+# hydra outputs (both pipeline/ml)
+**/outputs/
+**/multirun/
+
+# notebooks
+**/.ipynb_checkpoints/

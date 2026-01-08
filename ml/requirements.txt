@@ -1,0 +1,11 @@
+hydra-core
+omegaconf
+numpy
+pandas
+tqdm
+
+# pick one ML stack later (example: pytorch)
+# torch
+# torchvision
+# lightning
+# wandb
