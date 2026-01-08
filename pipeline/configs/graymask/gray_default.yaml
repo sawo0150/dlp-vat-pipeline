@@ -1,0 +1,101 @@
+# pipeline/configs/graymask/gray_default.yaml
+# -------------------------------------------------------------------
+# GrayMaskSynthesizer 설정
+# - "edge band만 grayscale"이 되도록 설계
+# - band 모양 다양화: 가변 두께 + 부분 선택 + 노이즈
+# - 모드 혼합: AA ramp / multi-ring / patches / anisotropic / gamma-quant
+# -------------------------------------------------------------------
+
+# 최종적으로 band 밖은 엄격히 binary(0 또는 255)로 고정할지
+clamp_outside_band: true
+
+# ---------- band shape 다양화 ----------
+band:
+  # 기본 band 폭(픽셀, 128x128 기준). 실제로는 noise로 위치별 변동됨
+  w_in: [2, 4]      # inside (mask=1 쪽) 밴드 두께 범위
+  w_out: [2, 4]     # outside (mask=0 쪽) 밴드 두께 범위
+
+  # band 두께를 위치마다 흔들기 위한 low-freq noise
+  variable_width:
+    enable_prob: 0.85
+    alpha: [0.2, 0.9]        # 두께 변동 강도(클수록 울퉁불퉁/두께 변화 큼)
+    sigma: [2.0, 6.0]        # noise blur sigma(클수록 저주파)
+
+  # band의 "일부 구간만" 남겨 partial band 만들기
+  partial:
+    enable_prob: 0.15
+    # partial 방식 선택 확률(합 1 필요 없음)
+    modes:
+      blob_gate: 0.50        # random blobs와 AND
+      sector_gate: 0.25      # 중심 기준 각도 섹터만 남김
+      stripe_gate: 0.25      # 큰 띠로 일부만 남김(대각선/수평/수직)
+
+    # blob gate 파라미터
+    blob:
+      num_blobs: [1, 4]
+      radius: [10, 40]       # 128 기준
+      smooth: true           # blur/threshold로 구불구불 경계
+
+  # ------------------------------------------------------------
+  # [NEW] band 내부 픽셀의 일부를 랜덤 값(0~255)로 "과감하게 덮어쓰기"
+  # - forward model이 "edge band 픽셀 값 변화"에 민감하게 학습하도록 분포 넓히기 목적
+  # - ratio가 크면 노이즈가 너무 강해질 수 있으니 0.1~0.3부터 시작 추천
+  # ------------------------------------------------------------
+  sparse_override_noise:
+    enable_prob: 0.5          # 이 노이즈를 적용할 확률
+    ratio: [0.05, 0.30]        # band 픽셀 중 덮어쓸 비율 범위
+    # 값 샘플링 방식
+    # - uniform: [0,255] 균일 랜덤
+    # - two_sided: 0 근처 또는 255 근처로 치우친 랜덤(강한 대비)
+    value_mode: uniform
+    # two_sided일 때 사용하는 low/high 구간 (0..low) U (high..255)
+    two_sided_low: 40
+    two_sided_high: 215
+    # 완전 독립 픽셀 노이즈는 너무 거칠 수 있어서 약간 블러로 뭉개는 옵션
+    blur_after:
+      enable: false
+      sigma: [0.6, 1.6]
+    # 덮어쓰기는 "모드 적용 후 마지막에" 수행하는 게 기본(추천)
+    apply_stage: final         # final | before_modes (확장용)
+
+# ---------- grayscale 생성 모드 혼합 ----------
+modes:
+  # 한 이미지에서 적용할 모드 개수
+  num_modes: [1, 3]
+
+  # 모드 선택 확률
+  probs:
+    aa_ramp: 0.35
+    multi_ring: 0.20
+    edge_patches: 0.20
+    anisotropic: 0.15
+    gamma_quant: 0.10
+
+aa_ramp:
+  bias: [-0.6, 0.6]          # 경계 위치 이동(픽셀)
+  slope: [0.15, 1.7]         # 전이 급격함(작을수록 급격)
+
+multi_ring:
+  k_in: [1, 4]
+  k_out: [1, 4]
+  g_in: [130, 255]           # inside ring intensity range
+  g_out: [0, 120]             # outside ring intensity range
+  # ring 내에서 거리 기반 그라데이션을 추가할지
+  gradient_prob: 0.4
+
+edge_patches:
+  sigma: [2.0, 7.0]          # 저주파 노이즈 스무딩
+  amp: [10, 180]              # band 내 intensity variation amplitude
+  # 고주파 약간 섞기(픽셀 수준 흔들림)
+  hf_prob: 0.35
+  hf_amp: [0, 90]
+
+anisotropic:
+  a: [0.05, 0.60]            # 방향 의존 gain 강도
+  # 2배 주기(cos2) vs 1배 주기(cos1) 랜덤
+  harmonic: [1, 2]
+
+gamma_quant:
+  gamma: [1.6, 2.6]
+  quant_prob: 0.65
+  levels: [16, 32, 64, 256]

@@ -1,4 +1,4 @@
-# configs/generator/mix_default.yaml
+# configs/generator/mix_imagenet.yaml
 # -----------------------------------------------------------------------------
 # Mask Generator 설정 파일 (합성 기반 랜덤 마스크 생성)
 #
@@ -31,9 +31,47 @@ mix:
   # - shape 비중을 올리면 "물체/도형" 중심
   # - grid/stripe 비중을 올리면 "주기/패턴" 중심
   layer_probs:
-    shape: 0.45
-    grid: 0.25
-    stripe: 0.30
+    shape: 0.40
+    grid: 0.1
+    stripe: 0.1
+    imagenet: 0.40  # [신규] ImageNet 기반 마스크가 30% 확률로 레이어에 등장
+
+imagenet:
+  # 아까 다운로드 받은 경로 (상대경로 or 절대경로)
+  data_dir: "../processed_imagenet"
+
+  # 사용할 이진화 알고리즘 목록 (원하는 것만 남기거나 확률 조절 가능) 
+  # - "threshold", "otsu", "adaptive", "canny", "quantize"]
+  methods: ["threshold", "otsu", "adaptive", "canny", "quantize"]
+
+  # [신규 기능] 강제 Sparse 모드
+  # true로 설정 시, 마스크의 흰색 비율이 sparse_threshold를 넘으면 자동으로 반전시킴
+  # -> 결과적으로 항상 검은색 배경이 더 많은 이미지가 생성됨
+  force_sparse: true
+  sparse_threshold: 0.5  # 흰색 비율이 40%를 넘으면 반전 (즉, 흰색을 40% 이하로 유지하려 함)
+
+  # 각 알고리즘별 파라미터 제어
+  params:
+    threshold:
+      range: [120, 240]  # 랜덤 임계값 범위
+
+    adaptive:
+      block_sizes: [11, 15, 21, 31, 45] # 블록 크기 후보
+      c_range: [2, 10]                  # 상수 C 범위
+
+    canny:
+      low_range: [30, 100]    # Low threshold 범위
+      high_range: [150, 250]  # High threshold 범위
+      dilate_prob: 0.5        # 엣지를 두껍게 만들 확률
+      dilate_k: [1, 2]        # 두껍게 만들 때 커널 크기
+
+    quantize:
+      divs: [32, 64, 80]      # 양자화 나눗셈 계수 후보
+
+  # 데이터 증강 (Augmentation)
+  invert_prob: 0    # 흑백 반전 확률
+  rotate_prob: 0.5    # 이미지 회전 확률
+  rotate_angle: [-180, 180]
 
 # -----------------------------------------------------------------------------
 # shapes: 랜덤 도형 레이어 생성 설정
@@ -43,7 +81,7 @@ mix:
 shapes:
   # 한 레이어(shape layer)에서 몇 개의 도형을 그릴지
   # - 늘리면 더 복잡한 형상, 너무 많으면 거의 꽉 차는 경향
-  num_shapes: [3, 9]
+  num_shapes: [3, 15]
 
   # 사용할 도형 타입 목록
   # - triangle: 삼각형
@@ -55,7 +93,7 @@ shapes:
 
   # 도형을 채울지(-1 fill) vs 윤곽선으로 그릴지(thickness>0) 비율
   # - 0.8이면 대부분 fill, 0.3이면 윤곽선 위주로 나옴
-  fill_prob: 0.80
+  fill_prob: 0.60
 
   # 윤곽선(thickness>0)일 때 두께 범위 [min,max]
   # - fill일 땐 무시됨
@@ -92,7 +130,7 @@ grid:
   thickness: [1, 2, 3, 4]
 
   # 기본 후보 spacing(legacy에서도 사용됨)
-  spacing: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+  spacing: [ 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
   # 회전 각도 범위(deg)
   # - grid는 회전만 적용해도 인상 확 달라짐
@@ -174,22 +212,22 @@ post:
   # invert_prob:
   # - 255-mask 반전 확률
   # - 패턴 다양성에 꽤 도움 됨 (너무 높이면 데이터 분포가 뒤집혀 버릴 수도)
-  invert_prob: 0.08
+  invert_prob: 0.02
 
   morph:
     # morphology 적용 확률
-    enable_prob: 0.30
+    enable_prob: 0.40
 
     # 적용할 연산 후보
     # - open: 작은 점/노이즈 제거 경향
     # - close: 작은 구멍 메우기 경향
     # - erode: 전체 얇게
     # - dilate: 전체 두껍게
-    op: ["open", "close", "erode", "dilate"]
+    op: ["open","erode"]
 
     # 커널 크기 범위 [min,max]
     # - 커질수록 변형이 강해짐
-    ksize: [1, 5]
+    ksize: [1, 3]
 
     # 반복 횟수 범위 [min,max]
     iters: [1, 2]

@@ -33,10 +33,14 @@ class DatasetManager:
         # 기본 폴더 구조 생성
         self.dirs = {
             "mask_input": ensure_dir(os.path.join(self.path, "raw", "mask_input")),
+            "mask_gray": ensure_dir(os.path.join(self.path, "raw", "mask_gray")),
+            "mask_band": ensure_dir(os.path.join(self.path, "raw", "mask_band")),
             "window": ensure_dir(os.path.join(self.path, "raw", "window_1080p")),
+            "window_gray": ensure_dir(os.path.join(self.path, "raw", "window_1080p_gray")),
             "camera_raw": ensure_dir(os.path.join(self.path, "raw", "camera_raw")),
             "processed": ensure_dir(os.path.join(self.path, "interim", "processed")),
             "debug": ensure_dir(os.path.join(self.path, "interim", "debug")),
+            "rig": ensure_dir(os.path.join(self.path, "rig")),
         }   
         
         log.info(f"Dataset initialized at: {self.path}")

@@ -1,0 +1,13 @@
+# pipeline/configs/task/graymask.yaml
+name: graymask
+
+# 이 task는 "기존 dataset에 들어가서" 작업하므로 load_id가 사실상 필수임
+# 실행 시: dataset.load_id="20260108_200636" 처럼 override 권장
+
+# 이미 mask_gray가 존재할 때 덮어쓸지 여부
+overwrite: true
+
+# manifest를 기준으로 처리할지, mask_input 폴더를 스캔할지
+# - manifest: manifest.csv의 mask_path를 따라감(추천)
+# - scan: raw/mask_input 폴더의 png를 전부 처리
+source: manifest

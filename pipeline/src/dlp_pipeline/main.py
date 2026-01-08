@@ -7,15 +7,18 @@ from tqdm import tqdm
 
 from dlp_pipeline.dataset import DatasetManager
 from dlp_pipeline.generator import MaskGenerator
+from dlp_pipeline.graymask_task import GrayMaskTask
 from dlp_pipeline.projector_interface import ProjectorWindow
 from dlp_pipeline.preprocessor import Preprocessor
 from dlp_pipeline.ingestor import DataIngestor
-from dlp_pipeline.utils import save_image
+from dlp_pipeline.utils import save_image, seed_everything
 
 log = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="config")
 def main(cfg: DictConfig):
+    seed_everything(int(cfg.seed), bool(cfg.deterministic))
+
     log.info(f"Task Started: {cfg.task.name}")
     log.info(f"Dataset Root: {cfg.paths.dataset_root}")
     
@@ -25,6 +28,8 @@ def main(cfg: DictConfig):
     # Task 분기
     if cfg.task.name == "generate":
         run_generate(cfg, ds)
+    elif cfg.task.name == "graymask":
+        run_graymask(cfg, ds)
     elif cfg.task.name == "ingest":
         run_ingest(cfg, ds)
     elif cfg.task.name == "preprocess":
@@ -69,6 +74,15 @@ def run_generate(cfg, ds):
         
     ds.update_manifest(manifest_data)
     log.info("Generation Complete.")
+
+def run_graymask(cfg, ds):
+    """
+    기존 dataset(load_id)에 존재하는 binary mask들을 읽어서
+    grayscale mask + editable band(mask) 생성 후 raw/에 저장하고 manifest 갱신
+    """
+    log.info("Starting GrayMask Task...")
+    task = GrayMaskTask(cfg, ds)
+    task.run()
 
 def run_ingest(cfg, ds):
     log.info("Starting Ingest Task...")

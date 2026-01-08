@@ -2,6 +2,8 @@
 import os
 import cv2
 import logging
+import os, random
+import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -22,3 +24,18 @@ def should_dump_debug(index, cfg):
     if index >= cfg.debug.max_images:
         return False
     return (index % cfg.debug.sample_every == 0)
+
+def seed_everything(seed: int, deterministic: bool = True):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # OpenCV 자체는 크게 상관 없지만,
+    # 멀티스레드로 인해 미세하게 달라질 수 있는 경우가 있어서 잠그고 싶으면:
+    try:
+        import cv2
+        if deterministic:
+            cv2.setNumThreads(1)
+            cv2.ocl.setUseOpenCL(False)
+    except Exception:
+        pass
