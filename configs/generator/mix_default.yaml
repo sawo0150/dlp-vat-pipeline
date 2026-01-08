@@ -1,0 +1,12 @@
+mix_ratios:
+  random_shapes: 0.4
+  grid: 0.3
+  stripe: 0.3
+
+grid:
+  thickness: [1, 2, 4]
+  spacing: [4, 8, 16]
+
+stripe:
+  period: [4, 8, 16]
+  orientation: ['h', 'v']

@@ -1,0 +1,3 @@
+name: generate
+num_images: 100
+output_dir: raw

@@ -1,0 +1,25 @@
+defaults:
+  - _self_
+  - task: generate
+  - rig: rig_default
+  - generator: mix_default
+  - registration: ecc
+
+hydra:
+  run:
+    dir: .  # 실행 위치 기준 (로그 폴더 생성 방지)
+  output_subdir: null
+
+paths:
+  dataset_root: ${oc.env:HOME}/dlp_datasets
+  experiment_inbox: null  # ingest 할 때 카메라 원본 폴더 경로
+
+dataset:
+  id_strategy: timestamp  # timestamp | manual
+  name: null              # null이면 자동 생성
+  save_intermediate: true # 중간 산출물 저장 여부
+
+debug:
+  enable: false
+  sample_every: 50
+  max_images: 200

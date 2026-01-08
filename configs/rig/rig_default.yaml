@@ -1,0 +1,23 @@
+name: rig_default
+projector:
+  width: 1920
+  height: 1080
+  insert_x: 852
+  insert_y: 640
+  window_size: 128
+
+mask:
+  base_size: 128
+  upscale_factor: 8
+  pad: 128
+  final_size: 1280
+
+camera:
+  transpose: true
+  rotation_deg: -1.1
+  scale_factor: 0.8016  # 8 / 9.98
+  pad: 256
+  # Crop Box [x, y, w, h] (Python 0-index 기준, 필요시 미세조정)
+  # Matlab: [267 286 1279 1279] -> Python은 x, y가 0부터 시작하므로 -1 보정 고려
+  crop_xywh: [266, 285, 1280, 1280] 
+  target_size: 1280

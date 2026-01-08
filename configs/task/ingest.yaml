@@ -1,0 +1,2 @@
+name: ingest
+match_pattern: "*.png"
