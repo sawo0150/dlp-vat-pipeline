@@ -1,0 +1,4 @@
+# [UROP Desktop] 프로젝트 폴더 내부 경로 지정
+# 실험실 컴퓨터가 바뀌면 이 파일만 복사해서 경로를 수정하면 됩니다.
+dataset_root: /home/wosasa/Desktop/25-1_UROP/dlp_datasets
+experiment_inbox: null

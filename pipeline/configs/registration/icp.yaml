@@ -1,0 +1,4 @@
+name: icp
+mode: icp
+max_iterations: 100
+tolerance: 1e-6

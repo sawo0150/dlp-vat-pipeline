@@ -1,0 +1,7 @@
+name: ecc
+mode: ecc
+# ECC 알고리즘 파라미터
+warp_mode: homography  # translation, euclidean, affine, homography
+number_of_iterations: 1000
+termination_eps: 1e-7
+gauss_kernel_size: 5

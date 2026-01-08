@@ -1,0 +1,23 @@
+# 데이터 처리 및 기본
+numpy
+pandas
+pyyaml
+tqdm
+
+# 이미지 처리
+pillow
+scikit-image
+opencv-python
+matplotlib
+
+# 설정 및 유틸리티
+hydra-core
+omegaconf
+pydantic
+
+# 개발 도구
+jupyterlab
+
+# (참고) 만약 머신러닝(Torch)도 필요하면 아래 주석을 푸세요
+# torch
+# torchvision
