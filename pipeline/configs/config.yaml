@@ -4,15 +4,12 @@ defaults:
   - rig: rig_default
   - generator: mix_default
   - registration: ecc
+  - paths: local_labtop       # 경로 설정 : default | local_labtop
 
 hydra:
   run:
     dir: .  # 실행 위치 기준 (로그 폴더 생성 방지)
   output_subdir: null
-
-paths:
-  dataset_root: ${oc.env:HOME}/dlp_datasets
-  experiment_inbox: null  # ingest 할 때 카메라 원본 폴더 경로
 
 dataset:
   id_strategy: timestamp  # timestamp | manual

@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from datetime import datetime
-from src.utils import ensure_dir
+from dlp_pipeline.utils import ensure_dir
 import logging
 
 log = logging.getLogger(__name__)

@@ -9,6 +9,7 @@ datasets/
 # hydra outputs (both pipeline/ml)
 **/outputs/
 **/multirun/
+*.log
 
 # notebooks
 **/.ipynb_checkpoints/

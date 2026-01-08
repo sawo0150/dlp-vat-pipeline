@@ -4,15 +4,15 @@ import logging
 import os
 from tqdm import tqdm
 
-from src.dataset import DatasetManager
-from src.generator import MaskGenerator
-from src.projector_interface import ProjectorWindow
-from src.preprocessor import ImagePreprocessor
-from src.utils import save_image
+from dlp_pipeline.dataset import DatasetManager
+from dlp_pipeline.generator import MaskGenerator
+from dlp_pipeline.projector_interface import ProjectorWindow
+from dlp_pipeline.preprocessor import ImagePreprocessor
+from dlp_pipeline.utils import save_image
 
 log = logging.getLogger(__name__)
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
+@hydra.main(version_base=None, config_path="../../configs", config_name="config")
 def main(cfg: DictConfig):
     log.info(f"Task Started: {cfg.task.name}")
     log.info(f"Dataset Root: {cfg.paths.dataset_root}")
