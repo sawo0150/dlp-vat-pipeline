@@ -1,0 +1,25 @@
+# configs/generator/b4_mix.yaml
+defaults:
+  - /generator/mix_imagenet
+
+mix:
+  num_layers: [2, 3]      # [핵심] 레이어 2개 또는 3개 합성
+  shuffle: true
+  layer_probs:
+    shape: 0.60
+    grid: 0.18
+    stripe: 0.18
+    imagenet: 0.04        # ImageNet도 아주 가끔 섞임
+
+post:
+  invert_prob: 0.08
+  morph:
+    enable_prob: 0.30
+    op: ["open", "close", "erode", "dilate"]
+    ksize: [1, 2]
+    iters: [1, 2]
+  filter:
+    enable: true
+    min_white_ratio: 0.07
+    max_white_ratio: 0.50
+    max_retries: 50

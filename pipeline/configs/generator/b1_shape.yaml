@@ -1,0 +1,40 @@
+# configs/generator/b1_shape.yaml
+defaults:
+  - /generator/mix_imagenet # 기본 설정을 상속받음 (필요한 것만 덮어쓰기)
+
+mix:
+  num_layers: [1, 1]      # 한 장에 레이어 1개만
+  layer_probs:
+    shape: 1.0            # Shape 100%
+    grid: 0.0
+    stripe: 0.0
+    imagenet: 0.0
+
+shapes:
+  types: ["circle", "rect", "triangle", "parallelogram", "polygon", "ellipse", "arc"]
+  num_shapes: [5, 15]     # 도형 개수 좀 더 많게
+  cutout_prob: 0.40       # Cutout 확률 대폭 증가 (기존 0.15 -> 0.5)
+  fill_prob: 0.9          # 채운 도형 위주
+  thickness: [2, 4]
+  size: [16, 32]           # 크기 다양하게
+  poly_vertices: [4, 6]
+  rotate:
+    # shape 레이어를 통째로 회전시키는 옵션
+    # - 도형이 주로 axis-aligned로 나오는 문제를 완화
+    enable: true
+    prob: 0.35          # 회전 적용 확률
+    angle: [-25, 25]    # 회전 각도 범위(deg)
+
+
+post:
+  invert_prob: 0.00
+  morph:
+    enable_prob: 0.00
+    op: ["open", "close", "erode", "dilate"]
+    ksize: [1, 5]
+    iters: [1, 2]
+  filter:
+    enable: true
+    min_white_ratio: 0.10
+    max_white_ratio: 0.50
+    max_retries: 50

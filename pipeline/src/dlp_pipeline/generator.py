@@ -99,26 +99,71 @@ class MaskGenerator:
         레이어 합성 한 장 생성.
         - layer types는 mix.layer_probs 또는 (fallback) mix_ratios로부터 샘플링
         - 각 layer는 ROI, 회전, jitter, waviness 등 랜덤 파라미터 포함
+        - Post-filter: 흰색 비율이 설정 범위를 벗어나면 재시도
         """
-        mix_cfg = getattr(self.cfg.generator, "mix", None)
-        if mix_cfg is None:
-            # 안전 fallback
-            img = self._gen_random_shapes()
-            return img, {"layers": ["shape"], "type_summary": "shape"}
+        # 1. 필터 설정 로드
+        post_cfg = getattr(self.cfg.generator, "post", None)
+        filter_cfg = getattr(post_cfg, "filter", None) if post_cfg else None
+        
+        should_filter = False
+        if filter_cfg and getattr(filter_cfg, "enable", False):
+            should_filter = True
+            min_r = float(getattr(filter_cfg, "min_white_ratio", 0.0))
+            max_r = float(getattr(filter_cfg, "max_white_ratio", 1.0))
+            max_retries = int(getattr(filter_cfg, "max_retries", 10))
+        else:
+            max_retries = 1
 
-        nmin, nmax = self._get_list2(mix_cfg, "num_layers", [1, 3])
-        n_layers = int(self.rng.integers(int(nmin), int(nmax) + 1))
+        # 2. 재시도 루프
+        final_img = None
+        final_meta = {}
+        
+        # print("디버깅중!!", max_retries, post_cfg)
+        for attempt in range(max_retries):
+            # ---- 기존 생성 로직 시작 ----
+            mix_cfg = getattr(self.cfg.generator, "mix", None)
+            if mix_cfg is None:
+                # 안전 fallback
+                img = self._gen_random_shapes()
+                final_img = img
+                final_meta = {"layers": ["shape"], "type_summary": "shape"}
+            else:
+                nmin, nmax = self._get_list2(mix_cfg, "num_layers", [1, 3])
+                n_layers = int(self.rng.integers(int(nmin), int(nmax) + 1))
 
-        layer_types = self._sample_layer_types(n_layers)
-        canvas = np.zeros((self.size, self.size), dtype=np.uint8)
+                layer_types = self._sample_layer_types(n_layers)
+                canvas = np.zeros((self.size, self.size), dtype=np.uint8)
 
-        for lt in layer_types:
-            layer = self._render_layer(lt)
-            canvas = np.maximum(canvas, layer)  # OR 합성
+                for lt in layer_types:
+                    layer = self._render_layer(lt)
+                    canvas = np.maximum(canvas, layer)  # OR 합성
 
-        canvas = self._postprocess(canvas)
-        meta = {"layers": layer_types, "type_summary": "+".join(layer_types)}
-        return canvas, meta
+                canvas = self._postprocess(canvas)
+                
+                final_img = canvas
+                final_meta = {"layers": layer_types, "type_summary": "+".join(layer_types)}
+            # ---- 기존 생성 로직 끝 ----
+
+            # 3. 비율 검사 (필터링 꺼져있으면 바로 break)
+            if not should_filter:
+                break
+                
+            # 흰색(255) 비율 계산
+            ratio = np.count_nonzero(final_img) / final_img.size
+            final_meta['white_ratio'] = ratio # 메타데이터에 기록
+
+            if min_r <= ratio <= max_r:
+                # print("조건 만족!!", attempt, ratio)
+                # 조건 만족 -> 루프 탈출
+                break
+            # print("조건 불만족!!", attempt)
+            
+            # 조건 불만족 -> attempt 반복 (마지막 시도였다면 그냥 그 결과 반환)
+            # 디버깅용 로그가 필요하면 print 등을 추가 가능
+            # if attempt == max_retries - 1:
+            #     print(f"[Warning] Mask generation failed validation after {max_retries} tries. Ratio: {ratio:.3f}")
+
+        return final_img, final_meta
 
     # ------------------------------------------------------------------
     # Layer sampling / rendering

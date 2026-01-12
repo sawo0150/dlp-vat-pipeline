@@ -193,3 +193,10 @@ post:
 
     # 반복 횟수 범위 [min,max]
     iters: [1, 2]
+
+  # [신규 추가] 결과물 필터링 설정
+  filter:
+    enable: true
+    min_white_ratio: 0.03   # 흰색 픽셀 최소 3%
+    max_white_ratio: 0.60   # 흰색 픽셀 최대 60%
+    max_retries: 10         # 조건 만족 실패 시 최대 10번까지 다시 시도

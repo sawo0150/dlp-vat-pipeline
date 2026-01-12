@@ -1,0 +1,41 @@
+# configs/generator/b3_stripe.yaml
+defaults:
+  - /generator/mix_imagenet
+
+mix:
+  num_layers: [1, 1]
+  layer_probs:
+    shape: 0.0
+    grid: 0.0
+    stripe: 1.0           # Stripe 100%
+    imagenet: 0.0
+
+stripe:
+  period: [6, 9, 12]     # 적당한 주기
+  orientation: ['h', 'v']
+  angle: [-180, 180]      # 전방향 회전
+  duty_cycle: [0.40, 0.85] # (period 대비) stripe가 “켜지는(on)” 폭 비율
+  period_jitter: 0.25
+  
+  roi:
+    enable_prob: 0.90
+    num_regions: [1, 3]
+    smooth: true
+
+  waviness:
+    enable_prob: 0.9      # [핵심] 구불구불하게
+    amp: [1, 20]          # 굴곡 진폭
+    wavelength: [10, 50]  # 굴곡 주기
+
+post:
+  invert_prob: 0.08
+  morph:
+    enable_prob: 0.30
+    op: ["open", "close", "erode", "dilate"]
+    ksize: [1, 2]
+    iters: [1, 2]
+  filter:
+    enable: true
+    min_white_ratio: 0.05
+    max_white_ratio: 0.50
+    max_retries: 50

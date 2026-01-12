@@ -1,0 +1,30 @@
+# configs/generator/b5_imagenet.yaml
+defaults:
+  - /generator/mix_imagenet
+
+mix:
+  num_layers: [1, 1]
+  layer_probs:
+    shape: 0.0
+    grid: 0.0
+    stripe: 0.0
+    imagenet: 1.0         # ImageNet 100%
+
+imagenet:
+  force_sparse: false      # [핵심] 흰색 비율 0.5 넘으면 반전시킴
+  sparse_threshold: 0.5
+  methods: ["adaptive", "otsu", "threshold"] # 엣지나 텍스처 위주 알고리즘 권장
+
+post:
+  invert_prob: 0.08
+  morph:
+    enable_prob: 1.00
+    # op: ["dilate", "erode"]
+    op: ["dilate"]
+    ksize: [2, 4]
+    iters: [1, 2]
+  filter:
+    enable: true
+    min_white_ratio: 0.07
+    max_white_ratio: 0.50
+    max_retries: 50

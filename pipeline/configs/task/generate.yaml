@@ -1,5 +1,5 @@
 # configs/task/generate.yaml
 
 name: generate
-num_images: 10000
+num_images: 100
 output_dir: raw

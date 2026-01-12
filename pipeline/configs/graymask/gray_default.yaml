@@ -1,101 +1,465 @@
 # pipeline/configs/graymask/gray_default.yaml
 # -------------------------------------------------------------------
-# GrayMaskSynthesizer 설정
-# - "edge band만 grayscale"이 되도록 설계
-# - band 모양 다양화: 가변 두께 + 부분 선택 + 노이즈
-# - 모드 혼합: AA ramp / multi-ring / patches / anisotropic / gamma-quant
+# GrayMaskSynthesizer 설정 (pipeline/src/dlp_pipeline/graymask_synth.py)
+#
+# 목표:
+#   - 입력: binary mask (0/255, uint8) 1장
+#   - 출력:
+#       (1) gray mask (0..255, uint8)  : 경계(edge band) 주변만 그레이가 존재하도록 합성
+#       (2) band mask (0/255, uint8)   : "그레이를 허용하는" 경계 영역(밴드) 표시
+#       (3) meta(dict->json)           : 샘플 seed, 선택된 모드/파라미터 기록
+#
+# 핵심 아이디어:
+#   1) SDF(signed distance field)를 만들고, SDF=0 근처(경계)를 기준으로
+#      inside/outside 방향으로 w_in/w_out 만큼의 "band"를 생성
+#   2) band 내부 픽셀만 여러 grayscale 모드(aa_ramp, multi_ring, ...)로 변형
+#   3) (권장) band 밖은 다시 strict binary(0 또는 255)로 clamp하여
+#      "edge band만 grayscale"이라는 데이터 조건을 강제
+#
+# 주의:
+#   - 코드에서 거리/두께 파라미터는 "픽셀 단위"로 직접 사용됩니다.
+#     주석에 "128x128 기준"이라고 적어두셨는데, 실제 구현은 해상도 스케일링을 하지 않습니다.
+#     즉, 256x256로 가면 같은 w_in=3이 상대적으로 더 얇아 보입니다.
 # -------------------------------------------------------------------
 
-# 최종적으로 band 밖은 엄격히 binary(0 또는 255)로 고정할지
+
+# -------------------------------------------------------------------
+# clamp_outside_band
+# -------------------------------------------------------------------
+# band(경계 영역) 바깥을 최종적으로 엄격히 binary로 되돌릴지 여부.
+#
+# 코드 위치:
+#   synthesize() 마지막 부분:
+#     clamp_outside = bool(_get(self.cfg.graymask, "clamp_outside_band", True))
+#     if clamp_outside:
+#         outside = ~band
+#         gray[(outside) & (m01 == 1)] = 255
+#         gray[(outside) & (m01 == 0)] = 0
+#
+# 의미:
+#   - True(권장): band 내부에서만 어떤 모드를 적용하더라도,
+#     band 밖은 원본 mask의 클래스(inside=255, outside=0)로 강제 복원됩니다.
+#     => 학습 데이터가 "경계만 애매하고 나머지는 확정"인 형태가 되어
+#        모델이 edge uncertainty/AA에 집중하도록 유도.
+#   - False: 모드가 gray 전체에 영향을 줄 가능성은 적지만,
+#     일부 구현(블러 등)에서 band 밖으로 값이 새는 상황을 그대로 허용하게 됩니다.
 clamp_outside_band: true
 
-# ---------- band shape 다양화 ----------
-band:
-  # 기본 band 폭(픽셀, 128x128 기준). 실제로는 noise로 위치별 변동됨
-  w_in: [2, 4]      # inside (mask=1 쪽) 밴드 두께 범위
-  w_out: [2, 4]     # outside (mask=0 쪽) 밴드 두께 범위
 
-  # band 두께를 위치마다 흔들기 위한 low-freq noise
+# -------------------------------------------------------------------
+# band: 경계 영역(band) 생성 파라미터
+# -------------------------------------------------------------------
+# band는 SDF(밖-안 거리)의 임계 범위로 정의됩니다.
+#
+# SDF 정의(코드):
+#   m01 = (bin_mask_u8 > 127).astype(np.uint8)          # inside=1, outside=0
+#   dist_in  = distanceTransform(m01)                   # inside 픽셀에서 내부까지 거리
+#   dist_out = distanceTransform(1-m01)                 # outside 픽셀에서 외부까지 거리
+#   sdf = dist_out - dist_in                            # >0 outside, <0 inside
+#
+# band 정의(코드):
+#   band = (sdf >= -w_in_map) & (sdf <= w_out_map)
+#
+# 해석:
+#   - sdf=0 부근이 경계선
+#   - inside 쪽(sdf<0)으로는 w_in_map 만큼 포함 (조건: sdf >= -w_in_map)
+#   - outside 쪽(sdf>0)으로는 w_out_map 만큼 포함 (조건: sdf <=  w_out_map)
+band:
+  # -----------------------------------------------------------------
+  # w_in / w_out
+  # -----------------------------------------------------------------
+  # band의 기본 두께(픽셀) 범위.
+  # 실제로는 아래 variable_width가 켜지면 픽셀 위치마다 두께가 흔들립니다.
+  #
+  # 코드 동작:
+  #   w_in0  = rng.integers(w_in_min,  w_in_max+1)  # 정수 샘플
+  #   w_out0 = rng.integers(w_out_min, w_out_max+1)
+  #
+  # 즉 [2,4]면 샘플마다 2 또는 3 또는 4 픽셀 두께를 "기본값"으로 선택합니다.
+  w_in: [2, 4]      # inside(mask=1, sdf<0) 방향 밴드 두께 범위 (정수 샘플)
+  w_out: [2, 4]     # outside(mask=0, sdf>0) 방향 밴드 두께 범위 (정수 샘플)
+
+  # -----------------------------------------------------------------
+  # variable_width: 위치별 두께 가변화 (저주파 noise 기반)
+  # -----------------------------------------------------------------
+  # 목적:
+  #   - 같은 두께의 깔끔한 band만 계속 나오면 모델이 특정 edge profile에 과적합하기 쉬움
+  #   - 저주파 노이즈로 w_in/w_out이 위치에 따라 조금씩 두꺼워졌다 얇아지게 해서
+  #     "울퉁불퉁한 / 두께 변화가 있는" 경계 불확실성 패턴을 만들어줌
+  #
+  # 코드 요약:
+  #   if rng.random() < enable_prob:
+  #       noise ~ N(0,1), GaussianBlur(sigma)
+  #       noise = noise / std ; clip(-2.5,2.5)/2.5 => 대략 [-1,1]
+  #       w_in_map  = clip(w_in0  * (1 + alpha*noise), 0.5, 10.0)
+  #       w_out_map = clip(w_out0 * (1 + alpha*noise), 0.5, 10.0)
+  #   else:
+  #       w_in_map/w_out_map = 상수 맵 (전 픽셀 동일 두께)
+  #
+  # 포인트:
+  #   - alpha가 클수록 두께 변화 폭이 커짐 (noise가 1일 때 (1+alpha)배)
+  #   - sigma가 클수록 더 저주파(큰 덩어리)로 흔들림
+  #   - 최종 두께는 [0.5, 10.0]으로 강제 clip됨 (너무 얇거나 너무 두꺼워지는 것 방지)
   variable_width:
     enable_prob: 0.85
-    alpha: [0.2, 0.9]        # 두께 변동 강도(클수록 울퉁불퉁/두께 변화 큼)
-    sigma: [2.0, 6.0]        # noise blur sigma(클수록 저주파)
+    # enable_prob:
+    #   - 각 샘플마다 variable width를 켤 확률.
+    #   - 0.85면 대부분의 샘플이 위치별 두께 변동을 갖게 됩니다.
 
-  # band의 "일부 구간만" 남겨 partial band 만들기
+    alpha: [0.2, 0.9]
+    # alpha (샘플마다 uniform 샘플):
+    #   - 두께 변동 강도. w_map = w0 * (1 + alpha*noise)
+    #   - noise는 대략 [-1, 1]이므로
+    #       alpha=0.2 => 두께가 대략 0.8~1.2배
+    #       alpha=0.9 => 두께가 대략 0.1~1.9배 (다만 최종 clip로 하한 0.5 보장)
+    #   - alpha를 너무 키우면 band의 일부가 매우 얇아지거나 두꺼워져
+    #     "경계 정의"가 불안정해질 수 있습니다.
+
+    sigma: [2.0, 6.0]
+    # sigma (샘플마다 uniform 샘플):
+    #   - GaussianBlur의 sigma. 노이즈의 공간 주파수를 결정.
+    #   - 작은 sigma(2 근처): 비교적 촘촘한 흔들림(짧은 구간에서 두께 변동)
+    #   - 큰 sigma(6 근처): 큰 덩어리 단위로 부드럽게 두께가 변함(저주파)
+
+  # -----------------------------------------------------------------
+  # partial: band의 일부 구간만 남기는 gating
+  # -----------------------------------------------------------------
+  # 목적:
+  #   - 항상 경계 전체가 그레이면 모델이 "경계는 항상 전체가 애매"라고 학습할 수 있음
+  #   - 일부 구간만 gray/AA가 존재하는 데이터도 섞어 edge-uncertainty의 다양성을 증가
+  #
+  # 코드:
+  #   part_prob = _get(part_cfg, "enable_prob", 0.70)
+  #   if rng.random() < part_prob:
+  #       gate = _make_partial_gate(...)
+  #       band = band & (gate > 0)
+  #
+  # 즉, enable_prob가 켜진 샘플에서는
+  #   "원래 band" ∩ "gate" = 최종 band 가 됩니다.
+  #
+  # 주의:
+  #   - YAML의 enable_prob가 0.15이면 "가끔만" partial 적용.
+  #   - key가 없으면 코드 기본값 0.70이 적용되므로,
+  #     이 값을 명시하는 건 실험 재현성 관점에서 매우 좋습니다.
   partial:
     enable_prob: 0.15
-    # partial 방식 선택 확률(합 1 필요 없음)
-    modes:
-      blob_gate: 0.50        # random blobs와 AND
-      sector_gate: 0.25      # 중심 기준 각도 섹터만 남김
-      stripe_gate: 0.25      # 큰 띠로 일부만 남김(대각선/수평/수직)
 
-    # blob gate 파라미터
+    # modes:
+    #   - gate 생성 방식의 가중치.
+    #   - rng.choice(keys, p=정규화된 가중치)로 하나를 고릅니다.
+    #   - 합이 1일 필요는 없고, 코드에서 자동 정규화합니다.
+    modes:
+      blob_gate: 0.50
+      # blob_gate:
+      #   - 랜덤 원(blob)들을 여러 개 찍어 gate(255) 영역을 만들고,
+      #     (smooth=true면) 블러+threshold로 유기적으로 찌그러뜨립니다.
+      #   - 결과적으로 "여기저기 군데군데"만 band가 살아남는 패턴.
+      sector_gate: 0.25
+      # sector_gate:
+      #   - 이미지 중심을 기준으로 특정 각도 범위(부채꼴)만 keep.
+      #   - diff = angle_wrap(ang - center) 로 wrap-safe한 각도 차를 구해
+      #     |diff| < width/2 인 영역만 남깁니다.
+      stripe_gate: 0.25
+      # stripe_gate:
+      #   - 회전된 큰 띠(선형 stripe)만 keep.
+      #   - 중심좌표에서 회전좌표 xr를 만들고,
+      #     |xr - offset| < thick 인 영역만 남깁니다.
+      #   - 즉, 대각선/수평/수직 등 다양한 방향의 띠가 랜덤 생성됩니다.
+
+    # blob gate 상세 파라미터 (mode=blob_gate일 때만 사용)
     blob:
       num_blobs: [1, 4]
-      radius: [10, 40]       # 128 기준
-      smooth: true           # blur/threshold로 구불구불 경계
+      # num_blobs:
+      #   - 찍을 원(블랍) 개수 범위(정수 샘플).
+      #   - 많을수록 gate가 더 넓게 분포해 band가 더 많이 살아남습니다.
 
-  # ------------------------------------------------------------
-  # [NEW] band 내부 픽셀의 일부를 랜덤 값(0~255)로 "과감하게 덮어쓰기"
-  # - forward model이 "edge band 픽셀 값 변화"에 민감하게 학습하도록 분포 넓히기 목적
-  # - ratio가 크면 노이즈가 너무 강해질 수 있으니 0.1~0.3부터 시작 추천
-  # ------------------------------------------------------------
+      radius: [10, 40]
+      # radius:
+      #   - 각 원의 반지름(픽셀) 범위(정수 샘플).
+      #   - 해상도 스케일링이 없으므로 입력 해상도가 바뀌면 체감 크기가 달라집니다.
+
+      smooth: true
+      # smooth:
+      #   - True면 원들을 찍은 뒤:
+      #       k = rng.integers(3,9) (홀수로 보정)
+      #       blur = GaussianBlur(out, (k,k), 0)
+      #       thr = rng.integers(60,170)
+      #       threshold로 다시 바이너리화
+      #     과정을 거쳐 gate 경계가 더 구불구불해집니다.
+      #   - False면 원들의 합집합 형태(딱딱한 경계)를 유지합니다.
+
+  # -----------------------------------------------------------------
+  # sparse_override_noise: band 내부 일부 픽셀을 강한 랜덤 값으로 덮어쓰기
+  # -----------------------------------------------------------------
+  # 목적:
+  #   - aa_ramp / ring / patches 같은 "구조적인" 그레이만 있으면
+  #     모델이 그 구조를 외워버릴 수 있음
+  #   - band 내부 픽셀 중 일부를 0~255 임의값으로 덮어써서
+  #     "edge band의 픽셀 값 분포"를 과감하게 넓힘
+  #
+  # 코드 위치:
+  #   synthesize()의 모드 적용 루프가 끝난 뒤:
+  #     gray, meta_sparse = _maybe_sparse_override_noise(rng, gray, band)
+  #
+  # 동작 요약(_maybe_sparse_override_noise):
+  #   1) enable_prob 확률로 실행
+  #   2) ratio ~ Uniform(rmin, rmax) 샘플
+  #   3) band 픽셀의 flat index 중 k=round(n_band*ratio) 개를 무작위 선택
+  #   4) 선택 픽셀 값을 value_mode에 따라 생성해서 out[chosen]=vals
+  #   5) blur_after(enable=true)면 band 내부에서만 블러를 적용(밖으로 새면 원래 gray로 복원)
   sparse_override_noise:
-    enable_prob: 0.5          # 이 노이즈를 적용할 확률
-    ratio: [0.05, 0.30]        # band 픽셀 중 덮어쓸 비율 범위
-    # 값 샘플링 방식
-    # - uniform: [0,255] 균일 랜덤
-    # - two_sided: 0 근처 또는 255 근처로 치우친 랜덤(강한 대비)
+    enable_prob: 0.5
+    # enable_prob:
+    #   - 샘플마다 sparse override를 적용할 확률.
+    #   - 0.5면 절반의 샘플에서 band 내부에 "강한 랜덤 픽셀"이 섞입니다.
+
+    ratio: [0.05, 0.30]
+    # ratio:
+    #   - band 픽셀 중 덮어쓸 비율의 범위(샘플마다 uniform).
+    #   - k = round(n_band * ratio) 로 개수를 결정하며,
+    #     최소 1개, 최대 n_band로 클램프됩니다.
+    #   - 너무 크게 잡으면(예: 0.6 이상) band가 "거의 랜덤"이 되어
+    #     구조적 모드(aa_ramp 등)의 의미가 약해질 수 있습니다.
+
     value_mode: uniform
-    # two_sided일 때 사용하는 low/high 구간 (0..low) U (high..255)
+    # value_mode:
+    #   - uniform: vals ~ randint(0,256) (0..255 균일)
+    #   - two_sided:
+    #       50%는 0..two_sided_low,
+    #       50%는 two_sided_high..255
+    #     => 극단값(거의 0 또는 거의 255)에 치우친 강한 대비 노이즈를 만듦
+    #
+    # 팁:
+    #   - uniform은 "전반적인 분포 확장"
+    #   - two_sided는 "극단 대비 edge artifact" 비슷한 효과
+
     two_sided_low: 40
     two_sided_high: 215
-    # 완전 독립 픽셀 노이즈는 너무 거칠 수 있어서 약간 블러로 뭉개는 옵션
+    # two_sided_low/high:
+    #   - value_mode=two_sided일 때만 사용
+    #   - low가 커질수록 "어두운 쪽" 값이 좀 더 넓게 퍼짐
+    #   - high가 작아질수록 "밝은 쪽" 값이 좀 더 넓게 퍼짐
+
     blur_after:
       enable: false
+      # blur_after.enable:
+      #   - True면 덮어쓴 랜덤 픽셀들이 "소금-후추"처럼 너무 반짝이는 걸 줄이기 위해
+      #     GaussianBlur를 한 번 적용합니다.
+      #   - 중요한 보호 장치:
+      #       out = blur(out)
+      #       out[~band] = gray[~band]
+      #     로 band 밖으로 번진 값은 원래대로 복원합니다.
+
       sigma: [0.6, 1.6]
-    # 덮어쓰기는 "모드 적용 후 마지막에" 수행하는 게 기본(추천)
-    apply_stage: final         # final | before_modes (확장용)
+      # blur sigma:
+      #   - enable=true일 때만 사용, 샘플마다 uniform.
+      #   - 작은 값(0.6): 살짝만 뭉개짐
+      #   - 큰 값(1.6): 랜덤 점들이 더 덩어리처럼 퍼짐
 
-# ---------- grayscale 생성 모드 혼합 ----------
+    apply_stage: final
+    # apply_stage:
+    #   - 주석에 "final | before_modes"라고 적어두셨지만,
+    #     현재 코드에서는 apply_stage 값을 읽지 않습니다.
+    #   - 즉, 구현상으로는 항상 "모드 적용 후(final)"에 수행됩니다.
+    #   - 나중에 확장하려면 synthesize()에서 모드 루프 전/후 분기 로직이 필요합니다.
+
+
+# -------------------------------------------------------------------
+# modes: grayscale 생성 모드 혼합 설정
+# -------------------------------------------------------------------
+# 코드 흐름:
+#   1) gray 초기값은 binary mask 그대로:
+#        gray = (m01*255).astype(float32)
+#   2) num_modes 범위에서 이번 샘플에서 사용할 모드 개수 n_modes를 정함
+#   3) probs 가중치로 mode_names 중에서 replace=False로 n_modes개 선택
+#      => 같은 모드를 중복 적용하지 않음(한 샘플에서 각 모드는 최대 1회)
+#   4) 선택된 모드를 순서대로 적용하며 gray를 누적 업데이트
+#
+# 효과:
+#   - 모드가 여러 개면, 앞 모드가 만든 gray 위에 뒤 모드가 추가 변형을 합니다.
+#   - 단, 대부분 band 내부만 수정하도록 구현되어 있어 바깥은 크게 안 변합니다.
 modes:
-  # 한 이미지에서 적용할 모드 개수
   num_modes: [1, 3]
+  # num_modes:
+  #   - 한 샘플에 적용할 모드 개수 범위(정수 샘플).
+  #   - 예: [1,3]이면 1~3개 중 랜덤.
+  #   - 모드가 많을수록 band 내부 변형이 복합적으로 섞여 다양성이 증가하지만,
+  #     너무 많으면 패턴이 과도하게 복잡해질 수도 있습니다.
 
-  # 모드 선택 확률
   probs:
     aa_ramp: 0.35
+    # aa_ramp:
+    #   - SDF 기반 logistic ramp로 "AA처럼" 부드러운 경계 전이를 생성
     multi_ring: 0.20
+    # multi_ring:
+    #   - morphology(erode/dilate)로 경계 안/밖 ring을 만들고
+    #     ring 부분을 특정 그레이 값으로 찍거나, 옵션으로 거리 기반 fade를 추가
     edge_patches: 0.20
+    # edge_patches:
+    #   - 저주파 노이즈(패치)로 band 내부 밝기 변화를 만들고,
+    #     옵션으로 고주파 노이즈를 조금 추가
     anisotropic: 0.15
+    # anisotropic:
+    #   - SDF gradient 방향(경계 법선 방향)에 따라 gain을 다르게 주어
+    #     방향성 있는 밝기 변화(각도 의존)를 생성
     gamma_quant: 0.10
+    # gamma_quant:
+    #   - 전체 gray에 gamma 커브를 적용하고,
+    #     확률적으로 quantize(계단화)하여 디지털/양자화 느낌을 섞음
+    #
+    # 주의:
+    #   - gamma_quant는 코드상 band 마스크 없이 gray 전체에 적용됩니다.
+    #     (하지만 clamp_outside_band=true면 band 밖은 마지막에 다시 0/255로 복원됨)
 
+
+# -------------------------------------------------------------------
+# aa_ramp 모드 파라미터 (GrayMaskSynthesizer._aa_ramp)
+# -------------------------------------------------------------------
+# 구현:
+#   x = (-(sdf - bias)) / slope
+#   ramp = sigmoid(x) = 1 / (1+exp(-x))
+#   target = 255 * ramp
+#   out[band] = target[band]
+#
+# 해석:
+#   - sdf가 0(경계)일 때 ramp가 0.5 근처가 되도록 bias로 위치 이동
+#   - slope가 작을수록 전이가 급격(거의 binary에 가까움)
+#   - slope가 클수록 전이가 완만(넓은 AA 영역처럼 보임)
 aa_ramp:
-  bias: [-0.6, 0.6]          # 경계 위치 이동(픽셀)
-  slope: [0.15, 1.7]         # 전이 급격함(작을수록 급격)
+  bias: [-0.6, 0.6]
+  # bias:
+  #   - 경계 위치를 픽셀 단위로 좌/우(inside/outside)로 살짝 이동시키는 값.
+  #   - sdf-bias가 들어가므로 bias>0이면 실질적으로 ramp의 중심이 바깥쪽으로 이동하는 효과.
 
+  slope: [0.15, 1.7]
+  # slope:
+  #   - logistic 함수의 스케일. 작을수록 더 가파름(짧은 거리에서 0->255 급변)
+  #   - 너무 작으면 AA보다는 "딱딱한 경계"에 가까워질 수 있음
+
+
+# -------------------------------------------------------------------
+# multi_ring 모드 파라미터 (GrayMaskSynthesizer._multi_ring)
+# -------------------------------------------------------------------
+# 구현 개요:
+#   kin/kout으로 커널 크기를 정해 erode/dilate를 수행하고,
+#   원본 m01과 비교해 경계 안쪽 ring(ring_in), 바깥쪽 ring(ring_out)을 추출:
+#     ring_in  = (m01==1) & (er==0)          # inside 경계 얇은 층
+#     ring_out = (di==1) & (m01==0)          # outside 경계 얇은 층
+#   ring 픽셀들에 g_in/g_out 값을 할당
+#   옵션으로 gradient_prob 확률로 sdf 기반 선형 fade(약하게) 추가
 multi_ring:
   k_in: [1, 4]
+  # k_in:
+  #   - erosion 커널 반경(정수). (2*kin+1) 크기의 타원 커널 사용.
+  #   - kin이 크면 inside ring 두께가 대체로 두꺼워집니다.
+
   k_out: [1, 4]
-  g_in: [130, 255]           # inside ring intensity range
-  g_out: [0, 120]             # outside ring intensity range
-  # ring 내에서 거리 기반 그라데이션을 추가할지
+  # k_out:
+  #   - dilation 커널 반경(정수). (2*kout+1) 크기의 타원 커널 사용.
+  #   - kout이 크면 outside ring 두께가 대체로 두꺼워집니다.
+
+  g_in: [130, 255]
+  # g_in:
+  #   - inside ring에 찍을 밝기 값(샘플마다 uniform).
+  #   - 값이 높을수록 inside ring이 밝아짐(흰 테두리 느낌).
+
+  g_out: [0, 120]
+  # g_out:
+  #   - outside ring에 찍을 밝기 값(샘플마다 uniform).
+  #   - 값이 낮을수록 outside ring이 어두워짐(검은 테두리 느낌).
+
   gradient_prob: 0.4
+  # gradient_prob:
+  #   - True면 ring 내부에서 sdf 거리를 이용해 약한 그라데이션을 추가합니다.
+  #   - 구현은 "강한 fade"가 아니라 0.35*t 정도만 반영:
+  #       inside: out = g_in  * (1 - 0.35*t)  (안쪽으로 갈수록 약간 어두워짐)
+  #       outside: out = g_out * (1 - 0.35*t) (바깥으로 갈수록 더 어두워짐)
+  #   - 결과적으로 ring이 단색 띠가 아니라 살짝 물리적인 감쇠를 갖게 됩니다.
 
+
+# -------------------------------------------------------------------
+# edge_patches 모드 파라미터 (GrayMaskSynthesizer._edge_patches)
+# -------------------------------------------------------------------
+# 구현:
+#   noise ~ N(0,1) -> GaussianBlur(sigma) -> 표준화
+#   out[band] = clip(out[band] + amp * noise[band])
+#   옵션으로 hf_prob 확률로 고주파(hf)도 추가:
+#       out[band] += hf_amp * N(0,1)
 edge_patches:
-  sigma: [2.0, 7.0]          # 저주파 노이즈 스무딩
-  amp: [10, 180]              # band 내 intensity variation amplitude
-  # 고주파 약간 섞기(픽셀 수준 흔들림)
+  sigma: [2.0, 7.0]
+  # sigma:
+  #   - 저주파 패치의 "덩어리 크기"를 결정.
+  #   - 크면 큰 얼룩, 작으면 비교적 촘촘한 얼룩.
+
+  amp: [10, 180]
+  # amp:
+  #   - 저주파 노이즈의 진폭(밝기 변화 강도).
+  #   - 크게 잡으면 band 내부가 매우 들쭉날쭉해짐.
+  #   - clamp_outside_band=true이면 band 밖은 안전하지만,
+  #     band 안에서의 “학습 난이도”가 급격히 올라갈 수 있습니다.
+
   hf_prob: 0.35
+  # hf_prob:
+  #   - 고주파 노이즈(픽셀 수준 흔들림)를 추가할 확률.
+  #   - sparse_override_noise와 동시에 켜지면 band 내부가 매우 거칠어질 수 있으니
+  #     둘 다 크게 쓰는 조합은 주의.
+
   hf_amp: [0, 90]
+  # hf_amp:
+  #   - 고주파 노이즈의 진폭.
+  #   - 0이면 사실상 hf가 의미 없고, 90이면 꽤 강한 랜덤성이 들어갑니다.
 
+
+# -------------------------------------------------------------------
+# anisotropic 모드 파라미터 (GrayMaskSynthesizer._anisotropic)
+# -------------------------------------------------------------------
+# 구현 핵심:
+#   gy,gx = gradient(sdf)
+#   theta = atan2(gy,gx)                   # 경계 법선 방향(대략)
+#   gain = 1 + a*cos(harmonic*(theta-phi))
+#   out[band] = clip(out[band] * gain)
+#
+# 의미:
+#   - 같은 거리(sdf)라도 "방향(theta)"에 따라 밝기 배율이 달라집니다.
+#   - harmonic=2면 cos(2*...)로 180도 주기(양방향 대칭) 패턴이 더 강해짐.
 anisotropic:
-  a: [0.05, 0.60]            # 방향 의존 gain 강도
-  # 2배 주기(cos2) vs 1배 주기(cos1) 랜덤
-  harmonic: [1, 2]
+  a: [0.05, 0.60]
+  # a:
+  #   - 방향성 gain의 강도.
+  #   - a=0이면 gain=1로 변화 없음.
+  #   - a가 커질수록 특정 방향에서는 더 밝아지고 다른 방향에서는 더 어두워집니다.
 
+  harmonic: [1, 2]
+  # harmonic:
+  #   - 1: cos(theta-phi) (360도 주기)
+  #   - 2: cos(2*(theta-phi)) (180도 주기, 더 대칭적인 방향 패턴)
+
+
+# -------------------------------------------------------------------
+# gamma_quant 모드 파라미터 (GrayMaskSynthesizer._gamma_quant)
+# -------------------------------------------------------------------
+# 구현:
+#   out = 255 * (gray/255)^gamma
+#   그리고 quant_prob 확률로 levels 중 하나를 골라 quantize:
+#     step = 255/(lv-1)
+#     out = round(out/step)*step
+#
+# 주의:
+#   - 이 모드는 band 마스크를 보지 않고 gray 전체에 적용됩니다.
+#   - 하지만 clamp_outside_band=true면 최종적으로 band 밖은 다시 0/255로 복원됩니다.
 gamma_quant:
   gamma: [1.6, 2.6]
+  # gamma:
+  #   - gamma>1이면 중간 톤이 더 어두워지는 경향(컨트라스트 커브 변화).
+  #   - gamma<1(여기서는 없음)이면 중간 톤이 더 밝아짐.
+
   quant_prob: 0.65
+  # quant_prob:
+  #   - 계단화(양자화) 적용 확률.
+  #   - True면 levels 중 하나를 골라 해당 단계 수로 밝기를 뭉툭하게 만듭니다.
+
   levels: [16, 32, 64, 256]
+  # levels:
+  #   - 양자화 단계 수 후보들.
+  #   - 256이면 사실상 연속(원래 8-bit)과 동일해서 quantize 효과가 거의 없음.
+  #   - 16/32처럼 작을수록 band 내부가 “계단”처럼 보이는 디지털 느낌이 강해집니다.

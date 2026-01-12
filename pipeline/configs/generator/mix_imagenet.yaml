@@ -84,6 +84,8 @@ shapes:
   num_shapes: [3, 15]
 
   # 사용할 도형 타입 목록
+  # - circle, 
+  # - rect, 
   # - triangle: 삼각형
   # - parallelogram: 평행사변형 (벡터 기반으로 생성)
   # - polygon: 임의 다각형 (vertex 개수 랜덤)
@@ -223,7 +225,7 @@ post:
     # - close: 작은 구멍 메우기 경향
     # - erode: 전체 얇게
     # - dilate: 전체 두껍게
-    op: ["open","erode"]
+    op: ["open","close", "close", "dilate"]
 
     # 커널 크기 범위 [min,max]
     # - 커질수록 변형이 강해짐
@@ -231,3 +233,10 @@ post:
 
     # 반복 횟수 범위 [min,max]
     iters: [1, 2]
+
+  # [신규 추가] 결과물 필터링 설정
+  filter:
+    enable: true
+    min_white_ratio: 0.80   # 흰색 픽셀 최소 3%
+    max_white_ratio: 0.90   # 흰색 픽셀 최대 60%
+    max_retries: 100         # 조건 만족 실패 시 최대 10번까지 다시 시도
