@@ -9,6 +9,7 @@ from typing import Dict, Tuple, Any, Optional, List
 
 import numpy as np
 import cv2
+from omegaconf import OmegaConf
 
 
 def _stable_int_from_str(s: str) -> int:
@@ -59,7 +60,36 @@ class GrayMaskSynthesizer:
         self.cfg = cfg
         self.base_seed = int(base_seed)
 
-    def synthesize(self, bin_mask_u8: np.ndarray, sample_id: str = "sample") -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    def synthesize(
+        self,
+        bin_mask_u8: np.ndarray,
+        sample_id: str = "sample",
+        cfg_override: Optional[Dict[str, Any]] = None,
+        meta_extra: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """
+        cfg_override:
+          - OmegaConf.merge(self.cfg, cfg_override)로 이번 호출에만 override 적용
+        meta_extra:
+          - meta에 추가로 기록할 필드들(group/profile/epsilon 등)
+        """
+        old_cfg = self.cfg
+        if cfg_override:
+            # dict or OmegaConf OK
+            self.cfg = OmegaConf.merge(self.cfg, cfg_override)
+        try:
+            out = self._synthesize_core(bin_mask_u8, sample_id=sample_id, meta_extra=meta_extra)
+        finally:
+            self.cfg = old_cfg
+        return out
+
+    def _synthesize_core(
+        self,
+        bin_mask_u8: np.ndarray,
+        sample_id: str,
+        meta_extra: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+
         # per-sample deterministic RNG (order independent)
         seed = self.base_seed + _stable_int_from_str(sample_id)
         rng = np.random.default_rng(seed)
@@ -187,7 +217,69 @@ class GrayMaskSynthesizer:
             "partial_band": meta_partial,
             "chosen_modes": meta_modes,
         }
+        if meta_extra:
+            meta.update(meta_extra)
+
         return gray_u8, band_u8, meta
+
+    # ------------------------------------------------------------
+    # Sobolev helpers
+    # ------------------------------------------------------------
+    def make_sobolev_phi(
+        self,
+        band_u8: np.ndarray,
+        sobolev_group_id: str,
+        basis_type: str = "patch",
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        band_u8: 0/255
+        반환:
+          phi: float32, 대략 [-1,1], band 밖은 0
+        """
+        h, w = band_u8.shape
+        band = (band_u8 > 127)
+
+        seed_phi = self.base_seed + _stable_int_from_str(f"{sobolev_group_id}|phi|{basis_type}")
+        rng = np.random.default_rng(seed_phi)
+
+        if basis_type == "patch":
+            noise = rng.normal(0, 1, size=(h, w)).astype(np.float32)
+            sigma = float(rng.uniform(2.0, 6.0))
+            noise = cv2.GaussianBlur(noise, (0, 0), sigmaX=sigma, sigmaY=sigma)
+            noise = noise / (np.std(noise) + 1e-6)
+            phi = np.clip(noise, -2.5, 2.5) / 2.5  # ~[-1,1]
+        else:
+            # fallback: patch
+            noise = rng.normal(0, 1, size=(h, w)).astype(np.float32)
+            noise = noise / (np.std(noise) + 1e-6)
+            phi = np.clip(noise, -2.5, 2.5) / 2.5
+
+        phi = phi * band.astype(np.float32)
+        meta = {
+            "seed_phi": int(seed_phi),
+            "basis_type": basis_type,
+            "phi_min": float(phi.min()) if phi.size else 0.0,
+            "phi_max": float(phi.max()) if phi.size else 0.0,
+        }
+        return phi, meta
+
+    def apply_sobolev_plus_minus(
+        self,
+        gray_anchor_u8: np.ndarray,
+        band_u8: np.ndarray,
+        phi: np.ndarray,
+        epsilon: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        gray_plus  = gray_anchor + eps * phi
+        gray_minus = gray_anchor - eps * phi
+        - band 밖은 phi=0이라 동일(anchor 유지)
+        """
+        g = gray_anchor_u8.astype(np.float32)
+        eps = float(epsilon)
+        plus = np.clip(g + eps * phi, 0, 255).astype(np.uint8)
+        minus = np.clip(g - eps * phi, 0, 255).astype(np.uint8)
+        return plus, minus
 
     def _maybe_sparse_override_noise(self, rng, gray: np.ndarray, band: np.ndarray):
         """
@@ -203,7 +295,7 @@ class GrayMaskSynthesizer:
         if rng.random() >= enable_prob:
             return gray, None
 
-        rmin, rmax = _get2(sn_cfg, "ratio", [0.10, 0.60])
+        rmin, rmax = _get2(sn_cfg, "ratio", [0.05, 0.30])
         ratio = float(rng.uniform(float(rmin), float(rmax)))
 
         # band 픽셀 인덱스

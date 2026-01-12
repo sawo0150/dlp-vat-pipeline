@@ -35,6 +35,7 @@ class DatasetManager:
             "mask_input": ensure_dir(os.path.join(self.path, "raw", "mask_input")),
             "mask_gray": ensure_dir(os.path.join(self.path, "raw", "mask_gray")),
             "mask_band": ensure_dir(os.path.join(self.path, "raw", "mask_band")),
+            "mask_gray_meta": ensure_dir(os.path.join(self.path, "raw", "mask_gray_meta")),
             "window": ensure_dir(os.path.join(self.path, "raw", "window_1080p")),
             "window_gray": ensure_dir(os.path.join(self.path, "raw", "window_1080p_gray")),
             "camera_raw": ensure_dir(os.path.join(self.path, "raw", "camera_raw")),

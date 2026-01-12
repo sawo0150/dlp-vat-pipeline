@@ -4,6 +4,8 @@ import os
 import json
 import logging
 import glob
+import re
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -17,6 +19,14 @@ from dlp_pipeline.projector_interface import ProjectorWindow
 
 log = logging.getLogger(__name__)
 
+def _stable_u01(s: str) -> float:
+    h = hashlib.md5(s.encode("utf-8")).hexdigest()[:8]
+    v = int(h, 16)
+    return v / float(0xFFFFFFFF)
+
+def _sanitize_stem(s: str) -> str:
+    # 파일명 안전 처리: |, 공백, = 등 -> __
+    return re.sub(r"[^A-Za-z0-9._-]+", "__", s)
 
 class GrayMaskTask:
     def __init__(self, cfg, ds_manager):
@@ -74,7 +84,15 @@ class GrayMaskTask:
 
         log.info(f"GrayMaskTask: processing {len(items)} masks (source={source_mode}, overwrite={overwrite})")
 
-        updates = []
+        # 새 manifest(1 gray sample = 1 row)
+        gray_manifest_path = os.path.join(self.ds.path, "manifest_gray.csv")
+        if os.path.exists(gray_manifest_path):
+            df_gray = pd.read_csv(gray_manifest_path)
+        else:
+            df_gray = pd.DataFrame()
+
+        rows_out = []
+
         debug_saved = 0
 
         for idx, (sample_id, mask_fname) in enumerate(tqdm(items, desc="GrayMask")):
@@ -84,66 +102,177 @@ class GrayMaskTask:
                 log.warning(f"Failed to read mask: {src_mask_path}")
                 continue
 
-            gray_name = f"{sample_id}_mask_gray.png"
-            band_name = f"{sample_id}_band.png"
-            win_gray_name = f"{sample_id}_window_gray.png"
-            dst_gray_path = os.path.join(self.ds.dirs["mask_gray"], gray_name)
-            dst_band_path = os.path.join(self.ds.dirs["mask_band"], band_name)
-            dst_win_gray_path = os.path.join(self.ds.dirs["window_gray"], win_gray_name)
+            base_id = str(sample_id)  # "id 형식 기반" (원하면 여기서 숫자만 추출 등 커스텀 가능)
 
-            if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_win_gray_path)):
-                # 이미 존재하면 스킵하지만 manifest는 맞춰둘 수 있음
-                meta = {"skipped": True}
-                updates.append({
-                    "sample_id": sample_id,
-                    "mask_gray_path": gray_name,
-                    "band_path": band_name,
-                    "window_gray_path": win_gray_name,
-                    "graymask_meta": json.dumps(meta, ensure_ascii=False),
-                })
-                continue
+            # ----------------------------
+            # 그룹 분기 (순서 무관, ID-hash)
+            # ----------------------------
+            gs = getattr(self.cfg.task, "group_split", None)
+            sob_ratio = float(getattr(gs, "sobolev_ratio", 0.0)) if gs is not None else 0.0
+            salt = str(getattr(gs, "hash_salt", "v1")) if gs is not None else "v1"
+            u = _stable_u01(f"{salt}|{base_id}")
+            is_sobolev = (u < sob_ratio)
+            group = "B" if is_sobolev else "A"
 
-            gray_img, band_img, meta = self.synth.synthesize(bin_img, sample_id=sample_id)
+            prof_cfg = getattr(self.cfg.task, "profiles", None)
 
-            save_image(dst_gray_path, gray_img)
-            save_image(dst_band_path, band_img)
+            def get_override(key: str):
+                if prof_cfg is None or not hasattr(prof_cfg, key):
+                    return None
+                node = getattr(prof_cfg, key)
+                if hasattr(node, "graymask_override"):
+                    return OmegaConf.to_container(getattr(node, "graymask_override"), resolve=True)
+                return None
 
-            # ------------------------------------------------------------
-            # [NEW] gray mask를 projector window(1080p)에 삽입해서 저장
-            # rig.projector.insert_x/y, width/height를 그대로 사용
-            # ------------------------------------------------------------
-            win_gray = self.proj.insert_mask(gray_img)
-            save_image(dst_win_gray_path, win_gray)
+            # ----------------------------
+            # profile 생성(각 base 1장 -> 3장)
+            # ----------------------------
+            if group == "A":
+                variants = [
+                    ("A0", f"{base_id}|A0|smooth_phys"),
+                    ("A1", f"{base_id}|A1|ring_aniso"),
+                    ("A2", f"{base_id}|A2|stress_quant_partial"),
+                ]
 
-            # debug dump
-            if should_dump_debug(idx, self.cfg) and debug_saved < int(self.cfg.debug.max_images):
-                dbg_dir = self.ds.dirs["debug"]
-                save_image(os.path.join(dbg_dir, f"{sample_id}_dbg_bin.png"), bin_img)
-                save_image(os.path.join(dbg_dir, f"{sample_id}_dbg_gray.png"), gray_img)
-                save_image(os.path.join(dbg_dir, f"{sample_id}_dbg_band.png"), band_img)
-                save_image(os.path.join(dbg_dir, f"{sample_id}_dbg_window_gray.png"), win_gray)
+                for pkey, sid in variants:
+                    out_stem = _sanitize_stem(sid)
+                    gray_name = f"{out_stem}_mask_gray.png"
+                    band_name = f"{out_stem}_band.png"
+                    win_gray_name = f"{out_stem}_window_gray.png"
+                    meta_name = f"{out_stem}_meta.json"
 
-                debug_saved += 1
+                    dst_gray_path = os.path.join(self.ds.dirs["mask_gray"], gray_name)
+                    dst_band_path = os.path.join(self.ds.dirs["mask_band"], band_name)
+                    dst_win_gray_path = os.path.join(self.ds.dirs["window_gray"], win_gray_name)
+                    dst_meta_path = os.path.join(self.ds.dirs["mask_gray_meta"], meta_name)
 
-            updates.append({
-                "sample_id": sample_id,
-                "mask_gray_path": gray_name,
-                "band_path": band_name,
-                "window_gray_path": win_gray_name,
-                "graymask_meta": json.dumps(meta, ensure_ascii=False),
-            })
+                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_win_gray_path) and os.path.exists(dst_meta_path)):
+                        continue
 
-        # manifest update (merge)
-        if updates:
-            df_new = pd.DataFrame(updates)
-            self.ds.manifest = pd.merge(self.ds.manifest, df_new, on="sample_id", how="left", suffixes=("", "_new"))
+                    override = get_override(pkey)
+                    meta_extra = {"group": "A", "profile": pkey, "base_id": base_id, "base_mask_path": mask_fname}
 
-            # _new 우선 반영
-            for col in ["mask_gray_path", "band_path", "window_gray_path", "graymask_meta"]:
-                if f"{col}_new" in self.ds.manifest.columns:
-                    self.ds.manifest[col] = self.ds.manifest[f"{col}_new"].fillna(self.ds.manifest.get(col))
-                    self.ds.manifest.drop(columns=[f"{col}_new"], inplace=True)
+                    gray_img, band_img, meta = self.synth.synthesize(
+                        bin_img, sample_id=sid, cfg_override=override, meta_extra=meta_extra
+                    )
 
-            self.ds.manifest.to_csv(self.ds.manifest_path, index=False)
+                    save_image(dst_gray_path, gray_img)
+                    save_image(dst_band_path, band_img)
 
-        log.info(f"GrayMaskTask complete. Updated {len(updates)} records.")
+                    win_gray = self.proj.insert_mask(gray_img)
+                    save_image(dst_win_gray_path, win_gray)
+
+                    with open(dst_meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+                    if should_dump_debug(idx, self.cfg) and debug_saved < int(self.cfg.debug.max_images):
+                        dbg_dir = self.ds.dirs["debug"]
+                        save_image(os.path.join(dbg_dir, f"{out_stem}_dbg_bin.png"), bin_img)
+                        save_image(os.path.join(dbg_dir, f"{out_stem}_dbg_gray.png"), gray_img)
+                        save_image(os.path.join(dbg_dir, f"{out_stem}_dbg_band.png"), band_img)
+                        debug_saved += 1
+
+                    rows_out.append({
+                        "base_id": base_id,
+                        "base_sample_id": sample_id,
+                        "group": "A",
+                        "profile": pkey,
+                        "sample_id": sid,
+                        "mask_path": mask_fname,
+                        "mask_gray_path": gray_name,
+                        "band_path": band_name,
+                        "window_gray_path": win_gray_name,
+                        "meta_path": meta_name,
+                    })
+
+            else:
+                # Sobolev: anchor/plus/minus
+                sob = getattr(self.cfg.task, "sobolev", None)
+                eps_choices = list(getattr(sob, "eps_choices", [8])) if sob is not None else [8]
+                basis_choices = list(getattr(sob, "basis_choices", ["patch"])) if sob is not None else ["patch"]
+
+                # deterministic pick (order-independent)
+                u_eps = _stable_u01(f"{salt}|{base_id}|eps")
+                u_bas = _stable_u01(f"{salt}|{base_id}|basis")
+                eps = int(eps_choices[int(u_eps * len(eps_choices)) % len(eps_choices)])
+                basis = str(basis_choices[int(u_bas * len(basis_choices)) % len(basis_choices)])
+
+                sobolev_group_id = f"{base_id}|basis={basis}|eps={eps}"
+
+                sid_anchor = f"{base_id}|B0|sobolev_anchor|basis={basis}|eps={eps}"
+                sid_plus   = f"{base_id}|B1|sobolev_plus|basis={basis}|eps={eps}"
+                sid_minus  = f"{base_id}|B2|sobolev_minus|basis={basis}|eps={eps}"
+
+                # 1) anchor 생성
+                override_anchor = get_override("B0")
+                meta_extra_anchor = {
+                    "group": "B", "profile": "B0", "base_id": base_id, "base_mask_path": mask_fname,
+                    "sobolev_group_id": sobolev_group_id, "epsilon": eps, "basis_type": basis,
+                }
+                gray_anchor, band_anchor, meta_anchor = self.synth.synthesize(
+                    bin_img, sample_id=sid_anchor, cfg_override=override_anchor, meta_extra=meta_extra_anchor
+                )
+
+                # 2) phi 생성(공유)
+                phi, meta_phi = self.synth.make_sobolev_phi(band_anchor, sobolev_group_id=sobolev_group_id, basis_type=basis)
+                # 3) plus/minus 생성
+                gray_plus, gray_minus = self.synth.apply_sobolev_plus_minus(gray_anchor, band_anchor, phi, epsilon=eps)
+
+                def save_one(sid: str, prof: str, gray_img_u8: "np.ndarray", extra_meta: dict):
+                    out_stem = _sanitize_stem(sid)
+                    gray_name = f"{out_stem}_mask_gray.png"
+                    band_name = f"{out_stem}_band.png"
+                    win_gray_name = f"{out_stem}_window_gray.png"
+                    meta_name = f"{out_stem}_meta.json"
+
+                    dst_gray_path = os.path.join(self.ds.dirs["mask_gray"], gray_name)
+                    dst_band_path = os.path.join(self.ds.dirs["mask_band"], band_name)
+                    dst_win_gray_path = os.path.join(self.ds.dirs["window_gray"], win_gray_name)
+                    dst_meta_path = os.path.join(self.ds.dirs["mask_gray_meta"], meta_name)
+
+                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_win_gray_path) and os.path.exists(dst_meta_path)):
+                        return
+
+                    save_image(dst_gray_path, gray_img_u8)
+                    save_image(dst_band_path, band_anchor)  # band는 anchor와 동일
+                    win_gray = self.proj.insert_mask(gray_img_u8)
+                    save_image(dst_win_gray_path, win_gray)
+
+                    meta = dict(extra_meta)
+                    meta["phi"] = meta_phi
+                    with open(dst_meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+                    rows_out.append({
+                        "base_id": base_id,
+                        "base_sample_id": sample_id,
+                        "group": "B",
+                        "profile": prof,
+                        "sample_id": sid,
+                        "mask_path": mask_fname,
+                        "mask_gray_path": gray_name,
+                        "band_path": band_name,
+                        "window_gray_path": win_gray_name,
+                        "meta_path": meta_name,
+                    })
+
+                # anchor 저장
+                save_one(sid_anchor, "B0", gray_anchor, meta_anchor)
+                # plus/minus meta는 anchor meta를 베이스로 profile만 변경
+                meta_plus = dict(meta_anchor);  meta_plus["profile"] = "B1"; meta_plus["sample_id"] = sid_plus
+                meta_minus = dict(meta_anchor); meta_minus["profile"] = "B2"; meta_minus["sample_id"] = sid_minus
+                save_one(sid_plus,  "B1", gray_plus,  meta_plus)
+                save_one(sid_minus, "B2", gray_minus, meta_minus)
+
+        # 새 manifest_gray.csv append 저장
+        if rows_out:
+            df_new = pd.DataFrame(rows_out)
+            if df_gray is None or df_gray.empty:
+                df_gray = df_new
+            else:
+                df_gray = pd.concat([df_gray, df_new], ignore_index=True)
+                # sample_id 기준으로 최신 유지(덮어쓰기 시)
+                df_gray = df_gray.drop_duplicates(subset=["sample_id"], keep="last")
+            df_gray.to_csv(gray_manifest_path, index=False)
+
+        log.info(f"GrayMaskTask complete. Wrote {len(rows_out)} gray samples -> {gray_manifest_path}")

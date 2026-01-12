@@ -11,3 +11,184 @@ overwrite: true
 # - manifest: manifest.csv의 mask_path를 따라감(추천)
 # - scan: raw/mask_input 폴더의 png를 전부 처리
 source: manifest
+
+# ------------------------------------------------------------
+# Group split (General vs Sobolev)
+# - "순서"가 아니라 "ID 기반"으로 deterministic하게 분기
+# - base_id 문자열(md5)을 [0,1)로 매핑해서 sobolev_ratio보다 작으면 Sobolev
+# ------------------------------------------------------------
+group_split:
+  method: hash
+  sobolev_ratio: 0.30      # 예: 전체의 16.67%를 Sobolev로
+  hash_salt: "v1"            # 나중에 분기 규칙을 바꾸고 싶으면 salt만 변경
+
+# ------------------------------------------------------------
+# Sobolev 구성
+# - base_id당 epsilon / basis를 deterministic하게 선택(순서 무관)
+# ------------------------------------------------------------
+sobolev:
+  eps_choices: [4, 8, 12]
+  basis_choices: ["patch"]   # 지금은 patch만, 추후 sdf/grad 등 확장 가능
+
+# ------------------------------------------------------------
+# Profile별 graymask override (필요 최소 틀)
+# - 각 profile은 "이번 synthesize 호출에만" cfg를 merge해서 적용
+# - 값은 일단 기본 뼈대(원하는 방향으로 더 튜닝 가능)
+# ------------------------------------------------------------# 각 그룹/상황별 프로필 정의
+# - 각 프로필은 아래의 'graymask defaults' 설정을 override(덮어쓰기)하여 적용됨
+profiles:
+  A0:
+    label: smooth_phys     # 가장 일반적인 물리적/광학적 블러 (AA Ramp 위주)
+    graymask_override:
+      graymask:
+        clamp_outside_band: true
+        modes:
+          num_modes: [2, 2]
+          probs: { aa_ramp: 0.75, edge_patches: 0.25 } # AA Ramp 비중을 높임
+        band:
+          partial: { enable_prob: 0.0 }                # 끊김 없이 전체 테두리 유지
+          sparse_override_noise: { enable_prob: 0.0 }  # 노이즈 픽셀 없음
+
+  A1:
+    label: ring_aniso      # 광학적 링잉(Ringing) 및 방향성 반사(Anisotropic) 모사
+    graymask_override:
+      graymask:
+        clamp_outside_band: true
+        modes:
+          num_modes: [2, 2]
+          probs: { multi_ring: 0.60, anisotropic: 0.40 }
+        band:
+          partial: { enable_prob: 0.05 }               # 아주 가끔만 테두리 끊김 발생
+          sparse_override_noise: { enable_prob: 0.0 }
+
+  A2:
+    label: stress_quant_partial # "악조건" 모사: 테두리 끊김 + 디지털 양자화 + 데드픽셀 노이즈
+    graymask_override:
+      graymask:
+        clamp_outside_band: true
+        modes:
+          num_modes: [2, 3] # 여러 효과를 강하게 중첩
+          probs: { gamma_quant: 0.65, aa_ramp: 0.15, edge_patches: 0.20 }
+        band:
+          partial: { enable_prob: 0.35 }               # 35% 확률로 테두리가 부분적으로 잘려나감
+          sparse_override_noise:                       # Band 내부에 강한 랜덤 노이즈(데드픽셀 등) 주입
+            enable_prob: 0.60
+            ratio: [0.10, 0.35]
+            value_mode: uniform
+            two_sided_low: 40
+            two_sided_high: 215
+            blur_after:
+              enable: false
+              sigma: [0.6, 1.6]
+            apply_stage: final
+
+  B0:
+    label: sobolev_anchor  # Sobolev 그룹의 기준점 (A0와 유사하게 부드러운 설정)
+    graymask_override:
+      graymask:
+        clamp_outside_band: true
+        modes:
+          num_modes: [2, 2]
+          probs: { aa_ramp: 0.40, edge_patches: 0.20, multi_ring: 0.20, anisotropic: 0.10, gamma_quant: 0.10}
+        band:
+          partial: { enable_prob: 0.10 }
+          sparse_override_noise: { enable_prob: 0.10 }
+
+
+# -----------------------
+# 2. Graymask Engine Defaults (상세 주석)
+# 이 설정들은 위의 profiles에서 override하지 않는 한 기본값으로 사용됩니다.
+# -----------------------
+graymask:
+  # Band 영역 밖(완전한 흰색/검은색 영역)을 강제로 0/255로 고정할지 여부.
+  # True(권장): 모델이 "경계 부분"의 불확실성에만 집중하게 됨.
+  # False: 블러나 노이즈가 Band 밖으로 새어나가는 것을 허용.
+  clamp_outside_band: true
+
+  # -----------------------------------------------------------
+  # Band: "그레이스케일이 허용되는" 경계 영역 정의
+  # -----------------------------------------------------------
+  band:
+    # SDF(거리) 기준 Band의 기본 두께 (단위: 픽셀)
+    # w_in: 경계선 안쪽(흰색 쪽)으로 파고드는 두께
+    # w_out: 경계선 바깥쪽(검은색 쪽)으로 퍼지는 두께
+    w_in: [2, 4]
+    w_out: [2, 4]
+
+    # 위치별 두께 가변화 (Variable Width)
+    # - 테두리 두께가 일정하지 않고 울퉁불퉁하게 변하도록 함
+    variable_width:
+      enable_prob: 0.85      # 적용 확률
+      alpha: [0.2, 0.9]      # 두께 변동 강도 (클수록 두께 차이가 심해짐)
+      sigma: [2.0, 6.0]      # 변동 패턴의 부드러움 (클수록 완만하게 두꺼워졌다 얇아짐)
+
+    # 부분적 Band (Partial Gating)
+    # - 테두리의 일부 구간을 아예 날려버림 (SDF Band Mask를 Gating)
+    partial:
+      enable_prob: 0.15      # 적용 확률 (기본값은 낮게)
+      modes:                 # 어떤 모양으로 잘라낼지 확률 분포
+        blob_gate: 0.50      # 랜덤한 원형 구멍들로 잘라냄
+        sector_gate: 0.25    # 부채꼴 모양으로 일부 각도만 남김
+        stripe_gate: 0.25    # 띠 모양으로 대각선/수직/수평 일부만 남김
+      blob:
+        num_blobs: [1, 4]    # 구멍 개수
+        radius: [10, 40]     # 구멍 크기
+        smooth: true         # 구멍 경계를 부드럽게 할지 여부
+
+    # 희소 노이즈 덮어쓰기 (Sparse Override Noise)
+    # - Band 영역 내부의 픽셀 일부를 강제로 랜덤 값으로 변경 (Dead Pixel, Salt&Pepper Noise)
+    # - Mode 적용 후 마지막 단계에서 덮어씌움
+    sparse_override_noise:
+      enable_prob: 0.5       # 적용 확률
+      ratio: [0.05, 0.30]    # Band 전체 픽셀 중 몇 %를 덮어쓸지
+      value_mode: uniform    # uniform: 0~255 랜덤 / two_sided: 아주 어둡거나 아주 밝은 값만 사용
+      two_sided_low: 40      # two_sided 모드일 때 어두운 값 상한
+      two_sided_high: 215    # two_sided 모드일 때 밝은 값 하한
+      blur_after:            # 노이즈를 찍은 후 살짝 블러링할지 (너무 튀는 것 방지)
+        enable: false
+        sigma: [0.6, 1.6]
+      apply_stage: final     # (코드 내부 참고용) 항상 마지막 단계에 적용됨
+
+  # -----------------------------------------------------------
+  # Modes: 실제 그레이스케일 값을 채우는 알고리즘 혼합
+  # -----------------------------------------------------------
+  modes:
+    num_modes: [1, 3]        # 한 이미지당 섞어 쓸 모드의 개수 (예: Ramp + Noise)
+    probs:                   # 각 모드가 선택될 확률 가중치
+      aa_ramp: 0.35          # 부드러운 그라데이션 (Anti-Aliasing)
+      multi_ring: 0.20       # 경계 주변 링잉 (테두리 띠)
+      edge_patches: 0.20     # 얼룩덜룩한 노이즈
+      anisotropic: 0.15      # 방향성(기울기)에 따른 밝기 변화
+      gamma_quant: 0.10      # 감마 보정 및 계단 현상(Quantization)
+
+  # [Mode 1] AA Ramp: SDF 기반의 부드러운 Sigmoid 경계
+  aa_ramp:
+    bias: [-0.6, 0.6]        # 경계 중심 위치 미세 조정 (Sub-pixel shift)
+    slope: [0.15, 1.7]       # 경계의 가파른 정도 (작을수록 급격, 클수록 부드러움)
+
+  # [Mode 2] Multi Ring: 경계선 안/팎에 얇은 띠(Ring) 생성
+  multi_ring:
+    k_in: [1, 4]             # 안쪽 링 두께 (커널 크기)
+    k_out: [1, 4]            # 바깥쪽 링 두께
+    g_in: [130, 255]         # 안쪽 링의 밝기 (보통 밝게)
+    g_out: [0, 120]          # 바깥쪽 링의 밝기 (보통 어둡게)
+    gradient_prob: 0.4       # 링 내부에 거리 기반 페이딩(그라데이션)을 줄 확률
+
+  # [Mode 3] Edge Patches: 저주파(얼룩) 및 고주파 노이즈 혼합
+  edge_patches:
+    sigma: [2.0, 7.0]        # 저주파 얼룩의 크기 (클수록 큰 덩어리)
+    amp: [10, 180]           # 저주파 얼룩의 강도
+    hf_prob: 0.35            # 고주파(자글자글한) 노이즈 추가 확률
+    hf_amp: [0, 90]          # 고주파 노이즈 강도
+
+  # [Mode 4] Anisotropic: 경계선의 각도(법선 벡터)에 따른 밝기 변화
+  # - 금속 질감이나 특정 방향 조명 효과 모사
+  anisotropic:
+    a: [0.05, 0.60]          # 밝기 변화의 강도 (Gain)
+    harmonic: [1, 2]         # 주파수 (1: 360도 주기, 2: 180도 주기-대칭)
+
+  # [Mode 5] Gamma & Quantization: 비선형 톤 매핑 및 포스터라이제이션
+  gamma_quant:
+    gamma: [1.6, 2.6]        # 감마 값 (>1 이면 중간톤이 어두워짐)
+    quant_prob: 0.65         # 양자화(계단현상) 적용 확률
+    levels: [16, 32, 64, 256] # 표현할 수 있는 밝기 단계 수 (작을수록 계단 현상 심함)
