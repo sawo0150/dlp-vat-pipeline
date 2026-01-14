@@ -2,6 +2,7 @@
 import os
 import pandas as pd
 from datetime import datetime
+import numpy as np
 from dlp_pipeline.utils import ensure_dir
 import logging
 
@@ -60,12 +61,44 @@ class DatasetManager:
     def update_manifest(self, new_data):
         """new_data: list of dicts"""
         df_new = pd.DataFrame(new_data)
+      
         if os.path.exists(self.manifest_path):
-            self.manifest = pd.read_csv(self.manifest_path)
-            # sample_id 기준으로 병합 (여기서는 단순 append 후 중복제거로 구현)
-            self.manifest = pd.concat([self.manifest, df_new]).drop_duplicates(subset=['sample_id'], keep='last')
+            df_old = pd.read_csv(self.manifest_path)
         else:
+            df_old = pd.DataFrame()
+
+        # 빈 old면 그냥 new
+        if df_old is None or df_old.empty:
             self.manifest = df_new
+            self.manifest.to_csv(self.manifest_path, index=False)
+            log.info(f"Manifest updated. Total records: {len(self.manifest)}")
+            return
+
+        # sample_id 없으면 기존 로직 fallback
+        if "sample_id" not in df_old.columns or "sample_id" not in df_new.columns:
+            self.manifest = pd.concat([df_old, df_new], ignore_index=True)
+            self.manifest.to_csv(self.manifest_path, index=False)
+            log.info(f"Manifest updated. Total records: {len(self.manifest)}")
+            return
+
+        # index로 맞춰서 "부분 업데이트" 수행 (NaN은 overwrite 안 함)
+        old_i = df_old.set_index("sample_id")
+        new_i = df_new.set_index("sample_id")
+
+        # 컬럼 union 정렬
+        cols = sorted(set(old_i.columns) | set(new_i.columns))
+        old_i = old_i.reindex(columns=cols)
+        new_i = new_i.reindex(columns=cols)
+
+        # update: new의 non-NA만 old에 덮어씀 (mask_path 보존됨)
+        old_i.update(new_i)
+
+        # new에만 있는 sample_id 추가
+        add_idx = new_i.index.difference(old_i.index)
+        if len(add_idx) > 0:
+            old_i = pd.concat([old_i, new_i.loc[add_idx]], axis=0)
+
+        self.manifest = old_i.reset_index()
         
         self.manifest.to_csv(self.manifest_path, index=False)
         log.info(f"Manifest updated. Total records: {len(self.manifest)}")

@@ -324,8 +324,13 @@ class MaskGenerator:
             if self.rng.random() < float(getattr(rot_cfg, "prob", 0.35) if rot_cfg is not None else 0.35):
                 ang = float(self.rng.uniform(float(amin), float(amax)))
                 img = self._rotate(img, ang)
+        # 1) 먼저 binary로 확정
+        img = self._binarize(img)
 
-        return self._binarize(img)    
+        # 2) [신규] shape boundary speckle 적용 (경계 band에서만 a×b 패치 추가)
+        img = self._maybe_add_boundary_speckle(img, s_cfg)
+
+        return self._binarize(img)
 
     def _gen_grid(self):
         # legacy 유지 (호환)
@@ -625,6 +630,168 @@ class MaskGenerator:
     def _binarize(self, img: np.ndarray):
         # 안전하게 0/255로
         return (img > 127).astype(np.uint8) * 255
+
+    # ------------------------------------------------------------------
+    # [신규] Boundary Speckle (for shapes)
+    # ------------------------------------------------------------------
+    def _maybe_add_boundary_speckle(self, mask: np.ndarray, shapes_cfg) -> np.ndarray:
+        """
+        이미 생성된 binary mask(0/255)에 대해,
+        경계 주변에서만 speckle patch를 찍되,
+        패치 내부는 0/255가 랜덤하게 섞인 micro-binary가 되도록 한다.
+
+        - anchor를 "edge pixel"에서 직접 뽑으면 패치가 경계에 더 밀착된다.
+        - patch 적용 방식:
+            overwrite: micro-binary로 덮어쓰기 (흰/검 섞임)
+            xor: 기존 mask를 patch 내부에서 토글(0<->255)
+            mix: overwrite/xor 혼합
+        """
+        if shapes_cfg is None:
+            return mask
+
+        sp_cfg = getattr(shapes_cfg, "speckle", None)
+        if sp_cfg is None:
+            return mask
+
+        if not bool(getattr(sp_cfg, "enable", False)):
+            return mask
+
+        prob = float(getattr(sp_cfg, "prob", 0.0))
+        if self.rng.random() >= prob:
+            return mask
+
+        # mask가 비어있거나(전부 0) 혹은 꽉 차있으면(전부 255) 의미가 약하니 빠르게 리턴
+        nnz = int(np.count_nonzero(mask))
+        if nnz == 0 or nnz == mask.size:
+            return mask
+
+        # ---------------------------
+        # 1) anchor 픽셀(경계) 뽑기
+        # ---------------------------
+        anchor_mode = str(getattr(sp_cfg, "anchor", "edge")).lower()
+
+        ys, xs = self._sample_boundary_anchors(mask, sp_cfg, mode=anchor_mode)
+        if xs is None or len(xs) == 0:
+            return mask
+
+        # 패치 개수
+        nmin, nmax = self._get_list2(sp_cfg, "num_patches", [10, 80])
+        n_patches = int(self.rng.integers(int(nmin), int(nmax) + 1))
+        n_patches = max(1, n_patches)
+
+        # 샘플링 인덱스 (중복 허용해도 되지만, 일단 replace=True로 두면 간단/빠름)
+        idxs = self.rng.choice(len(xs), size=n_patches, replace=True)
+
+        # a,b 후보: [1,2,3]
+        patch_sizes = self._get_list(sp_cfg, "patch_sizes", [1, 2, 3])
+        swap_prob = float(getattr(sp_cfg, "swap_prob", 0.5))
+
+        # patch 내부 micro-binary 확률 (패치마다 랜덤)
+        fp_min, fp_max = self._get_list2(sp_cfg, "fill_prob", [0.4, 0.6])
+        fp_min = float(fp_min); fp_max = float(fp_max)
+        fp_min, fp_max = (min(fp_min, fp_max), max(fp_min, fp_max))
+
+        # mode
+        mode = str(getattr(sp_cfg, "mode", "mix")).lower()
+        mix_prob = float(getattr(sp_cfg, "mix_prob", 0.5))
+ 
+        out = mask.copy()
+
+        for ii in idxs:
+            y = int(ys[ii])
+            x = int(xs[ii])
+
+            a = int(self.rng.choice(patch_sizes))
+            b = int(self.rng.choice(patch_sizes))
+            a = max(1, a)
+            b = max(1, b)
+
+            # a×b vs b×a 랜덤 스왑
+            if self.rng.random() < swap_prob:
+                a, b = b, a
+
+            # -----------------------------------------
+            # 2) "경계에 붙게" 배치: anchor 픽셀이 패치에 포함되도록
+            #    (anchor를 patch center로 삼기보단, patch가 anchor를 확실히 덮도록)
+            # -----------------------------------------
+            # anchor를 포함하도록 top-left 계산 (anchor가 패치 내부에 들어가기만 하면 됨)
+            x0 = x - int(self.rng.integers(0, a))   # [0, a-1] 만큼 왼쪽으로
+            y0 = y - int(self.rng.integers(0, b))   # [0, b-1] 만큼 위로
+            x1 = x0 + a
+            y1 = y0 + b
+
+            # clip to image bounds
+            x0 = max(0, min(self.size - 1, x0))
+            y0 = max(0, min(self.size - 1, y0))
+            x1 = max(0, min(self.size, x1))
+            y1 = max(0, min(self.size, y1))
+
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            # -----------------------------------------
+            # 3) 패치 내부 micro-binary 생성
+            # -----------------------------------------
+            fill_p = float(self.rng.uniform(fp_min, fp_max))
+            h = y1 - y0
+            w = x1 - x0
+            patch = (self.rng.random((h, w)) < fill_p).astype(np.uint8) * 255
+
+            # -----------------------------------------
+            # 4) 적용 방식 (overwrite / xor / mix)
+            # -----------------------------------------
+            use_mode = mode
+            if mode == "mix":
+                use_mode = "overwrite" if (self.rng.random() < mix_prob) else "xor"
+
+            if use_mode == "overwrite":
+                out[y0:y1, x0:x1] = patch
+            elif use_mode == "xor":
+                # patch의 255인 곳만 토글(0<->255), 0인 곳은 유지
+                region = out[y0:y1, x0:x1]
+                toggle = (patch > 0)
+                region[toggle] = 255 - region[toggle]
+                out[y0:y1, x0:x1] = region
+            else:
+                # fallback: overwrite
+                out[y0:y1, x0:x1] = patch
+
+        return out
+
+    def _sample_boundary_anchors(self, mask: np.ndarray, sp_cfg, mode: str = "edge"):
+        """
+        speckle patch를 경계에 최대한 붙이기 위한 anchor 픽셀 샘플링.
+        - edge: morphology gradient(=dilate-erode)로 edge 픽셀을 뽑음 (가장 밀착)
+        - band: dilate XOR erode band에서 뽑음 (조금 더 넓게)
+        """
+        mode = (mode or "edge").lower()
+        bw_min, bw_max = self._get_list2(sp_cfg, "band_width", [1, 2])
+        bw = int(self.rng.integers(int(bw_min), int(bw_max) + 1))
+        bw = max(1, bw)
+
+        k = 2 * bw + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        dil = cv2.dilate(mask, kernel, iterations=1)
+        ero = cv2.erode(mask, kernel, iterations=1)
+
+        if mode == "band":
+            sel = cv2.bitwise_xor(dil, ero)
+        else:
+            # edge: morphology gradient (dilate - erode). binary에선 사실상 edge 강하게 나옴
+            sel = cv2.subtract(dil, ero)
+
+        ys, xs = np.where(sel > 0)
+        if len(xs) == 0:
+            return None, None
+
+        # anchor jitter (옵션)
+        jitter = float(getattr(sp_cfg, "anchor_jitter", 0.0))
+        if jitter > 0:
+            j = int(round(jitter))
+            xs = np.clip(xs + self.rng.integers(-j, j + 1, size=xs.shape[0]), 0, self.size - 1)
+            ys = np.clip(ys + self.rng.integers(-j, j + 1, size=ys.shape[0]), 0, self.size - 1)
+
+        return ys, xs
 
     def _rand_polygon(self, cx: int, cy: int, n_vertices: int, radius: int):
         """

@@ -15,7 +15,6 @@ from omegaconf import OmegaConf
 
 from dlp_pipeline.utils import save_image, should_dump_debug
 from dlp_pipeline.graymask_synth import GrayMaskSynthesizer
-from dlp_pipeline.projector_interface import ProjectorWindow
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +32,6 @@ class GrayMaskTask:
         self.cfg = cfg
         self.ds = ds_manager
         self.synth = GrayMaskSynthesizer(cfg, base_seed=int(getattr(cfg, "seed", 0) or 0))
-        self.proj = ProjectorWindow(cfg)
 
     def run(self):
         # 이 task는 기존 dataset에 들어가서 작업하는 게 자연스러움
@@ -138,15 +136,13 @@ class GrayMaskTask:
                     out_stem = _sanitize_stem(sid)
                     gray_name = f"{out_stem}_mask_gray.png"
                     band_name = f"{out_stem}_band.png"
-                    win_gray_name = f"{out_stem}_window_gray.png"
                     meta_name = f"{out_stem}_meta.json"
 
                     dst_gray_path = os.path.join(self.ds.dirs["mask_gray"], gray_name)
                     dst_band_path = os.path.join(self.ds.dirs["mask_band"], band_name)
-                    dst_win_gray_path = os.path.join(self.ds.dirs["window_gray"], win_gray_name)
                     dst_meta_path = os.path.join(self.ds.dirs["mask_gray_meta"], meta_name)
 
-                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_win_gray_path) and os.path.exists(dst_meta_path)):
+                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_meta_path)):
                         continue
 
                     override = get_override(pkey)
@@ -158,9 +154,6 @@ class GrayMaskTask:
 
                     save_image(dst_gray_path, gray_img)
                     save_image(dst_band_path, band_img)
-
-                    win_gray = self.proj.insert_mask(gray_img)
-                    save_image(dst_win_gray_path, win_gray)
 
                     with open(dst_meta_path, "w", encoding="utf-8") as f:
                         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -181,7 +174,6 @@ class GrayMaskTask:
                         "mask_path": mask_fname,
                         "mask_gray_path": gray_name,
                         "band_path": band_name,
-                        "window_gray_path": win_gray_name,
                         "meta_path": meta_name,
                     })
 
@@ -222,21 +214,17 @@ class GrayMaskTask:
                     out_stem = _sanitize_stem(sid)
                     gray_name = f"{out_stem}_mask_gray.png"
                     band_name = f"{out_stem}_band.png"
-                    win_gray_name = f"{out_stem}_window_gray.png"
                     meta_name = f"{out_stem}_meta.json"
 
                     dst_gray_path = os.path.join(self.ds.dirs["mask_gray"], gray_name)
                     dst_band_path = os.path.join(self.ds.dirs["mask_band"], band_name)
-                    dst_win_gray_path = os.path.join(self.ds.dirs["window_gray"], win_gray_name)
                     dst_meta_path = os.path.join(self.ds.dirs["mask_gray_meta"], meta_name)
 
-                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_win_gray_path) and os.path.exists(dst_meta_path)):
+                    if (not overwrite) and (os.path.exists(dst_gray_path) and os.path.exists(dst_band_path) and os.path.exists(dst_meta_path)):
                         return
 
                     save_image(dst_gray_path, gray_img_u8)
                     save_image(dst_band_path, band_anchor)  # band는 anchor와 동일
-                    win_gray = self.proj.insert_mask(gray_img_u8)
-                    save_image(dst_win_gray_path, win_gray)
 
                     meta = dict(extra_meta)
                     meta["phi"] = meta_phi
@@ -252,7 +240,6 @@ class GrayMaskTask:
                         "mask_path": mask_fname,
                         "mask_gray_path": gray_name,
                         "band_path": band_name,
-                        "window_gray_path": win_gray_name,
                         "meta_path": meta_name,
                     })
 

@@ -1,0 +1,5 @@
+# configs/task/project.yaml
+name: project
+which: both          # binary | gray | both
+source: manifest     # manifest | scan  (scan은 폴더 스캔)
+overwrite: true     # 이미 있으면 스킵할지

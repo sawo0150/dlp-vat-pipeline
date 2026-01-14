@@ -7,9 +7,10 @@
 
 defaults:
   - _self_                  # 이 config.yaml 자체를 defaults 체인에 포함
-  - task: graymask            # 실행할 작업 선택: generate | ingest | preprocess
+  - task: generate            # 실행할 작업 선택: generate | graymask | project | ingest | preprocess
                             #   - generate: 마스크 생성 + projector window 이미지 생성
                             #   - graymask: 마스크 생성 + projector window 이미지 생성
+                            #   - project: projector window 이미지 생성
                             #   - ingest:   카메라(raw bmp 등) 파일을 dataset으로 수집/정리(예정)
                             #   - preprocess: 카메라 이미지 정합/크롭/리사이즈 등 전처리(예정)
   - rig: rig_default        # 장비/시스템(프로젝터 해상도, 삽입 좌표, 카메라 전처리 파라미터 등)
@@ -38,8 +39,8 @@ dataset:
   save_intermediate: true   # interim(중간 산출물) 저장 여부
                             #   - true:  전처리 결과/중간 결과를 디스크에 남김(디버깅/추적 유리)
                             #   - false: 최종 산출물만 남기고 중간 파일 저장 최소화
-  load_id: "20260109_132951"             # 기존 데이터셋을 불러올 때 사용 (폴더명 입력, 예: null | "20260108_200533")
-  # load_id: null   
+  # load_id: "20260109_132951"             # 기존 데이터셋을 불러올 때 사용 (폴더명 입력, 예: null | "20260108_200533")
+  load_id: null   
 debug:
   enable: true             # 디버그 이미지/중간 산출물 저장을 켤지 여부
                             #   - true면 interim/debug 등에 샘플을 저장

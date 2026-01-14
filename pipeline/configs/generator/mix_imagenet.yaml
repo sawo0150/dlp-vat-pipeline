@@ -122,6 +122,44 @@ shapes:
     prob: 0.35          # 회전 적용 확률
     angle: [-25, 25]    # 회전 각도 범위(deg)
 
+  # ---------------------------------------------------------------------------
+  # [신규] boundary speckle (shape 생성 후 "경계 근처"만 거칠게 만들기)
+  # - 이미 만들어진 binary mask에서 경계 band를 만들고,
+  #   band 픽셀 중 일부를 랜덤 선택해 a×b(1~3) 패치(직사각형)를 255로 찍어 speckle 추가
+  # - a,b는 patch_sizes에서 선택 (기본: [1,2,3])
+  # ---------------------------------------------------------------------------
+  speckle:
+    enable: true
+    prob: 0.35              # shape layer 생성 후 speckle 적용 확률
+    band_width: [1, 3]      # 경계 band 두께(픽셀). 커질수록 경계 주변 선택 영역이 넓어짐
+
+    # a,b 후보 (a×b 패치 크기). 요청대로 1,2,3 중 선택
+    patch_sizes: [1, 2, 3]
+    swap_prob: 0.5          # a×b vs b×a 랜덤 스왑 확률 (방향 다양화)
+
+    # 몇 개의 패치를 찍을지
+    # - 너무 크면 경계가 과하게 두꺼워질 수 있음
+    num_patches: [20, 70]
+
+    # [신규] speckle patch 내부를 "흰/검 랜덤 binary"로 만들기 위한 설정
+    # - fill_prob: 패치 내부에서 255가 될 확률 (나머지는 0)
+    fill_prob: [0.5, 0.5]     # 패치마다 랜덤으로 뽑아 다양화
+    # - optional: 패치 내부에 공간 상관성을 주고 싶으면 blur/threshold 같은 걸 넣을 수도 있는데,
+    #   지금은 단순 Bernoulli noise로 충분히 speckle 느낌 남
+
+    # [신규] 패치 적용 방식
+    # - overwrite: 패치 내부를 micro-binary로 덮어쓰기 (0/255 섞임)
+    # - xor: 기존 mask를 패치 내부에서 토글 (0<->255)
+    # - mix: overwrite/xor를 섞음
+    mode: "mix"
+    mix_prob: 0.6              # mode==mix일 때 overwrite 선택 확률 (나머지는 xor)
+
+    # [신규] 경계에 최대한 "붙게" 하는 옵션
+    # anchor를 band가 아니라 "edge pixel"에서 직접 뽑도록(더 붙음)
+    anchor: "edge"             # ["edge", "band"] (현재 코드는 edge 우선)
+    anchor_jitter: 0.0         # anchor 좌표에 ±jitter 픽셀 (0이면 완전 밀착)
+
+
 # -----------------------------------------------------------------------------
 # grid: 그리드 레이어 생성 설정
 # - 단순한 고정 spacing이 아니라 line마다 spacing/thickness가 바뀌도록 jitter 적용
@@ -237,6 +275,6 @@ post:
   # [신규 추가] 결과물 필터링 설정
   filter:
     enable: true
-    min_white_ratio: 0.80   # 흰색 픽셀 최소 3%
-    max_white_ratio: 0.90   # 흰색 픽셀 최대 60%
+    min_white_ratio: 0.07   # 흰색 픽셀 최소 3%
+    max_white_ratio: 0.50   # 흰색 픽셀 최대 60%
     max_retries: 100         # 조건 만족 실패 시 최대 10번까지 다시 시도

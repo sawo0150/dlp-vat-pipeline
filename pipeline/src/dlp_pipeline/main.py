@@ -8,7 +8,7 @@ from tqdm import tqdm
 from dlp_pipeline.dataset import DatasetManager
 from dlp_pipeline.generator import MaskGenerator
 from dlp_pipeline.graymask_task import GrayMaskTask
-from dlp_pipeline.projector_interface import ProjectorWindow
+from dlp_pipeline.project_task import ProjectTask
 from dlp_pipeline.preprocessor import Preprocessor
 from dlp_pipeline.ingestor import DataIngestor
 from dlp_pipeline.utils import save_image, seed_everything
@@ -30,6 +30,8 @@ def main(cfg: DictConfig):
         run_generate(cfg, ds)
     elif cfg.task.name == "graymask":
         run_graymask(cfg, ds)
+    elif cfg.task.name == "project":
+        run_project(cfg, ds)
     elif cfg.task.name == "ingest":
         run_ingest(cfg, ds)
     elif cfg.task.name == "preprocess":
@@ -38,9 +40,8 @@ def main(cfg: DictConfig):
         log.error("Unknown task!")
 
 def run_generate(cfg, ds):
-    """마스크 생성 및 프로젝터 윈도우 생성"""
+    """마스크 생성(128x128)만 수행. 1080p window는 project task에서 생성."""
     gen = MaskGenerator(cfg)
-    proj = ProjectorWindow(cfg)
     
     count = cfg.task.num_images
     log.info(f"Generating {count} masks...")
@@ -54,19 +55,13 @@ def run_generate(cfg, ds):
     for idx, item in enumerate(tqdm(samples)):
         sample_id = f"sample_{idx:05d}"
         mask_name = f"{sample_id}_mask.png"
-        win_name = f"{sample_id}_window.png"
         
         # Save Mask (128x128)
         save_image(os.path.join(ds.dirs['mask_input'], mask_name), item['image'])
         
-        # Process Window (1080p)
-        win_img = proj.insert_mask(item['image'])
-        save_image(os.path.join(ds.dirs['window'], win_name), win_img)
-        
         manifest_data.append({
             "sample_id": sample_id,
             "mask_path": mask_name,
-            "window_path": win_name,
             "pattern_type": item['type'],
             "mask_width": gen_size,
             "mask_height": gen_size
@@ -82,6 +77,11 @@ def run_graymask(cfg, ds):
     """
     log.info("Starting GrayMask Task...")
     task = GrayMaskTask(cfg, ds)
+    task.run()
+
+def run_project(cfg, ds):                      # [NEW]
+    log.info("Starting Project Task...")
+    task = ProjectTask(cfg, ds)
     task.run()
 
 def run_ingest(cfg, ds):
