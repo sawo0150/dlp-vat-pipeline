@@ -1,0 +1,3 @@
+# configs/task/inverse.yaml
+
+_target_: dlp_ml.tasks.inverse.InverseTask

@@ -1,15 +1,12 @@
+# configs/config.yaml
 defaults:
-  - task: train
+  - task: inverse
+  - model: unet
+  - data: manifest_pair
+  - loss: l1
+  - trainer: default
+  - logger: wandb
+  - _self_
 
-task:
-  name: train
-
-data:
-  dataset_root: /data/dlp_datasets
-  dataset_id: null
-  manifest: manifest.csv
-
-train:
-  seed: 123
-  batch_size: 8
-  num_workers: 4
+# global
+seed: 42

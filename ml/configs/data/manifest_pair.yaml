@@ -1,0 +1,22 @@
+# configs/data/manifest_pair.yaml
+
+# Path to a JSONL manifest containing input/target pairs.
+# Each line JSON should include keys specified by input_key/target_key.
+manifest_path: ${hydra:runtime.cwd}/../example_manifest.jsonl
+base_dir: null
+
+input_key: input_path
+target_key: target_path
+
+# PIL convert mode: L or RGB
+input_mode: L
+target_mode: L
+normalize: true
+
+batch_size: 8
+num_workers: 4
+val_ratio: 0.1
+
+# IMPORTANT: prevent leakage when multiple samples share same id 
+# (e.g., many thresholds per mask)
+group_split: true

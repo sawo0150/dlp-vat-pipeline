@@ -1,0 +1,9 @@
+# configs/trainer/default.yaml
+
+use_cuda: true
+lr: 1.0e-3
+weight_decay: 0.0
+max_epochs: 20
+log_every: 50
+grad_clip: 0.0
+amp: true

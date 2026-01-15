@@ -1,0 +1,4 @@
+# configs/loss/mse.yaml
+
+name: mse
+weight: 1.0

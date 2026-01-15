@@ -1,0 +1,8 @@
+# configs/logger/wandb.yaml
+
+name: wandb
+project: dlp-vat
+entity: null
+run_name: null
+tags: []
+mode: online   # online | offline | disabled
