@@ -47,3 +47,34 @@ naming:
   input_folder: "digital_mask"    # 기존 A 폴더의 이름 (예: digital_mask)
   target_folder: "light_dist"     # 기존 B 폴더의 이름 (예: light_dist)
   descriptive_files: true         # 파일명에 split, type 정보를 포함할지 여부
+
+paired:
+  # 어떤 입력을 학습 input으로 쓸지
+  # mask_input: raw/mask_input (128x128)
+  # mask_gray:  raw/mask_gray
+  # window:     raw/window_1080p(_gray)
+  input_source: "mask_gray"
+
+  # GUI에서 만든 mapping CSV 위치(상대경로는 dataset 폴더 기준)
+  mapping_dir: "pairing"
+  mapping_name: null          # null이면 "최근 mapping" 자동 탐색
+
+  # light가 bmp일 수 있으니 확장자 허용
+  light_exts: [".bmp", ".png"]
+
+  # 정합
+  do_register: true
+  warp_mode: "translation"
+  ecc_iters: 2000
+  ecc_eps: 1e-6
+  gauss_filt: 5
+
+  # 저장 사이즈 (학습용)
+  out_size: [256, 256]
+  crop_roi: null
+  save_debug: true
+
+  # 출력 폴더 네이밍
+  process_name: "paired_v1"
+  input_folder: "digital_mask"
+  target_folder: "light_dist"

@@ -10,6 +10,7 @@ from dlp_pipeline.generator import MaskGenerator
 from dlp_pipeline.graymask_task import GrayMaskTask
 from dlp_pipeline.project_task import ProjectTask
 from dlp_pipeline.preprocessor import Preprocessor
+from dlp_pipeline.pair_task import PairTask
 from dlp_pipeline.ingestor import DataIngestor
 from dlp_pipeline.utils import save_image, seed_everything
 
@@ -36,6 +37,8 @@ def main(cfg: DictConfig):
         run_ingest(cfg, ds)
     elif cfg.task.name == "preprocess":
         run_preprocess(cfg, ds)
+    elif cfg.task.name == "pair_gui":
+        run_pair_gui(cfg, ds)
     else:
         log.error("Unknown task!")
 
@@ -92,6 +95,11 @@ def run_ingest(cfg, ds):
 def run_preprocess(cfg, ds):
     proc = Preprocessor(cfg, ds)
     proc.run()
+
+def run_pair_gui(cfg, ds):
+    log.info("Starting Pair GUI Task...")
+    task = PairGUITask(cfg, ds)
+    task.run()
     
 if __name__ == "__main__":
     main()

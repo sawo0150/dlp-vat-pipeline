@@ -22,6 +22,10 @@ class Preprocessor:
     def run(self):
         log.info("Starting Preprocessing Task...")
         
+        # [NEW] mapping 기반 pair 전처리 모드
+        if hasattr(self.p_cfg, "paired"):
+            return self._run_paired_light()
+         
         manifest = self.ds.manifest
         if manifest.empty:
             log.error("Manifest is empty!")
@@ -97,6 +101,256 @@ class Preprocessor:
             
         # 5. ML Dataset Split 실행 (Preprocessing 직후 수행)
         self._build_ml_dataset()
+
+    # ------------------------------------------------------------------
+    # [NEW] mapping 기반: window(or mask) <-> light_distribution pairing
+    # ------------------------------------------------------------------
+    def _run_paired_light(self):
+        paired = self.p_cfg.paired
+
+        # gray/binary 판별: dataset에 window_1080p_gray가 있으면 gray를 기본으로
+        use_gray = os.path.isdir(self.ds.dirs.get("window_gray", "")) and \
+                   os.path.isdir(os.path.join(self.ds.path, "raw", "light_distribution_gray"))
+
+        win_root = self.ds.dirs["window_gray"] if use_gray else self.ds.dirs["window"]
+        light_root = os.path.join(self.ds.path, "raw", "light_distribution_gray" if use_gray else "light_distribution")
+
+        input_source = str(getattr(paired, "input_source", "mask_gray")).lower()
+        if input_source == "mask_input":
+            in_root = self.ds.dirs["mask_input"]
+        elif input_source == "mask_gray":
+            in_root = self.ds.dirs["mask_gray"]
+        else:
+            in_root = win_root
+
+        mapping_dir = str(getattr(paired, "mapping_dir", "pairing"))
+        mapping_name = getattr(paired, "mapping_name", None)
+        map_root = ensure_dir(os.path.join(self.ds.path, mapping_dir))
+
+        # mapping 자동 선택: 가장 최근 csv
+        if mapping_name is None or str(mapping_name).lower() == "null":
+            cands = [f for f in os.listdir(map_root) if f.endswith(".csv")]
+            if not cands:
+                raise FileNotFoundError(f"No mapping csv in {map_root}. Run task=pair_gui first.")
+            cands = sorted(cands, key=lambda x: os.path.getmtime(os.path.join(map_root, x)), reverse=True)
+            mapping_name = cands[0]
+
+        mapping_path = os.path.join(map_root, str(mapping_name))
+        log.info(f"[paired] using mapping: {mapping_path}")
+
+        df_map = pd.read_csv(mapping_path)
+        if df_map.empty:
+            log.warning("Mapping CSV is empty.")
+            return
+
+        # output dirs
+        process_name = str(getattr(paired, "process_name", "paired"))
+        input_folder = str(getattr(paired, "input_folder", "digital_mask"))
+        target_folder = str(getattr(paired, "target_folder", "light_dist"))
+
+        base_proc_dir = ensure_dir(os.path.join(self.ds.path, "interim", f"processed_{process_name}"))
+        dir_input = ensure_dir(os.path.join(base_proc_dir, input_folder))
+        dir_target = ensure_dir(os.path.join(base_proc_dir, target_folder))
+        dir_debug = self.ds.dirs["debug"]
+
+        # ECC params
+        do_register = bool(getattr(paired, "do_register", True))
+        warp_mode = str(getattr(paired, "warp_mode", "translation")).lower()
+        ecc_iters = int(getattr(paired, "ecc_iters", 2000))
+        ecc_eps = float(getattr(paired, "ecc_eps", 1e-6))
+        gauss = int(getattr(paired, "gauss_filt", 5))
+
+        out_size = tuple(getattr(paired, "out_size", [256, 256]))
+        roi = getattr(paired, "crop_roi", None)
+        save_debug = bool(getattr(paired, "save_debug", True))
+
+        def warp_mode_cv(s: str) -> int:
+            if s == "translation": return cv2.MOTION_TRANSLATION
+            if s == "euclidean": return cv2.MOTION_EUCLIDEAN
+            if s == "affine": return cv2.MOTION_AFFINE
+            if s == "homography": return cv2.MOTION_HOMOGRAPHY
+            return cv2.MOTION_TRANSLATION
+
+        def apply_crop(img, roi_):
+            if roi_ is None: return img
+            x,y,w,h = [int(v) for v in roi_]
+            return img[y:y+h, x:x+w]
+
+        def apply_resize(img, size_):
+            ow, oh = int(size_[0]), int(size_[1])
+            return cv2.resize(img, (ow, oh), interpolation=cv2.INTER_AREA)
+
+        def ecc_align(ref_u8, mov_u8):
+            ref = ref_u8.astype(np.float32) / 255.0
+            mov = mov_u8.astype(np.float32) / 255.0
+            if gauss and gauss > 0:
+                k = gauss if gauss % 2 == 1 else gauss + 1
+                ref = cv2.GaussianBlur(ref, (k,k), 0)
+                mov = cv2.GaussianBlur(mov, (k,k), 0)
+            wm = warp_mode_cv(warp_mode)
+            if wm == cv2.MOTION_HOMOGRAPHY:
+                warp = np.eye(3,3, dtype=np.float32)
+            else:
+                warp = np.eye(2,3, dtype=np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, ecc_iters, ecc_eps)
+            try:
+                cc, warp = cv2.findTransformECC(ref, mov, warp, wm, criteria, None, 1)
+            except cv2.error:
+                return mov_u8, -1.0
+            if wm == cv2.MOTION_HOMOGRAPHY:
+                aligned = cv2.warpPerspective(
+                    mov_u8, warp, (ref_u8.shape[1], ref_u8.shape[0]),
+                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0
+                )
+            else:
+                aligned = cv2.warpAffine(
+                    mov_u8, warp, (ref_u8.shape[1], ref_u8.shape[0]),
+                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0
+                )
+            return aligned, float(cc)
+
+        processed_rows = []
+
+        # mapping CSV 형식: window_file, light_file
+        for _, r in tqdm(df_map.iterrows(), total=len(df_map), desc="Paired preprocess"):
+            wfile = str(r.get("window_file", "")).strip()
+            lfile = str(r.get("light_file", "")).strip()
+            if not wfile or not lfile:
+                continue
+
+            # window_file은 batch 내부 파일명이라고 가정 (GUI 저장 방식)
+            # batch는 window_file에서 유추 불가하므로 mapping_name에 batch를 포함시키는 것을 권장
+            # 여기서는 모든 batch를 스캔하지 않고, "mapping 파일명에 batch_XXXX가 포함"된다고 가정
+            # fallback: window 폴더 전체에서 검색
+            # ---- find window absolute path ----
+            win_abs = None
+            for b in os.scandir(win_root):
+                if not b.is_dir() or not b.name.startswith("batch_"):
+                    continue
+                cand = os.path.join(b.path, wfile)
+                if os.path.exists(cand):
+                    win_abs = cand
+                    batch_name = b.name
+                    break
+            if win_abs is None:
+                log.warning(f"window not found: {wfile}")
+                continue
+
+            # light는 같은 batch 아래에 있다고 가정
+            light_abs = os.path.join(light_root, batch_name, lfile)
+            if not os.path.exists(light_abs):
+                log.warning(f"light not found: {batch_name}/{lfile}")
+                continue
+
+            # input source 로드
+            if input_source == "window":
+                inp_abs = win_abs
+
+            else:
+                # window파일명을 sample_id로 바로 못 바꾸므로, manifest를 통해 window_path->sample_id 매핑이 이상적
+                # 일단: window####.png -> sample_id를 manifest에서 검색 (window_path endswith window####.png)
+                sid = None
+                if os.path.exists(os.path.join(self.ds.path, "manifest_gray.csv")):
+                    dfm = pd.read_csv(os.path.join(self.ds.path, "manifest_gray.csv"))
+                    hit = dfm[dfm.get("window_gray_path","").astype(str).str.endswith(f"{batch_name}/{wfile}")]
+                    if len(hit) > 0:
+                        sid = str(hit.iloc[0]["sample_id"])
+                        gp = str(hit.iloc[0].get("mask_gray_path",""))
+
+                        mp = str(hit.iloc[0].get("mask_path",""))
+                    else:
+                        gp = mp = ""
+
+                else:
+                    dfm = self.ds.manifest
+
+                    hit = dfm[dfm.get("window_path","").astype(str).str.endswith(f"{batch_name}/{wfile}")]
+
+                    if len(hit) > 0:
+                        sid = str(hit.iloc[0]["sample_id"])
+                        mp = str(hit.iloc[0].get("mask_path",""))
+                        gp = ""
+                    else:
+                        gp = mp = ""
+
+                if sid is None:
+                    # fallback: 파일명 기반 sid 생성
+                    sid = os.path.splitext(wfile)[0]
+
+                if input_source == "mask_gray":
+                    if gp:
+                        inp_abs = os.path.join(self.ds.dirs["mask_gray"], gp)
+                    else:
+                        inp_abs = None
+                else:  # mask_input
+                    if mp:
+                        inp_abs = os.path.join(self.ds.dirs["mask_input"], mp)
+                    else:
+                        inp_abs = None
+
+                if inp_abs is None or not os.path.exists(inp_abs):
+                    log.warning(f"input not found for {wfile} (source={input_source})")
+                    continue
+
+            # 이미지 로드
+            inp = cv2.imread(inp_abs, cv2.IMREAD_GRAYSCALE)
+            win = cv2.imread(win_abs, cv2.IMREAD_GRAYSCALE)
+            light = cv2.imread(light_abs, cv2.IMREAD_GRAYSCALE)
+            if inp is None or win is None or light is None:
+                continue
+
+            # 정합은 "window 기준으로 light를 정합"
+            cc = None
+            aligned = light
+            if do_register:
+                aligned, cc = ecc_align(win, light)
+
+            # crop/resize
+            inp2 = apply_resize(apply_crop(inp, roi), out_size)
+            tgt2 = apply_resize(apply_crop(aligned, roi), out_size)
+
+            # 저장
+            # sample id는 window파일명 기반으로 안전하게
+            sid2 = os.path.splitext(wfile)[0]
+            out_in = os.path.join(dir_input, f"{sid2}.png")
+            out_tg = os.path.join(dir_target, f"{sid2}.png")
+            cv2.imwrite(out_in, inp2)
+            cv2.imwrite(out_tg, tgt2)
+
+            if save_debug:
+                try:
+                    overlay = cv2.addWeighted(win, 0.5, aligned, 0.5, 0.0)
+                    cv2.imwrite(os.path.join(dir_debug, f"{sid2}_overlay.png"), overlay)
+                except Exception:
+                    pass
+
+            processed_rows.append({
+                "sample_id": sid2,
+                "paired_window_file": f"{batch_name}/{wfile}",
+                "paired_light_file": f"{batch_name}/{lfile}",
+                "ecc_cc": cc,
+                "processed_input_path": os.path.join(f"processed_{process_name}", input_folder, f"{sid2}.png"),
+                "processed_target_path": os.path.join(f"processed_{process_name}", target_folder, f"{sid2}.png"),
+            })
+
+        # manifest 업데이트 (기본 manifest.csv에 기록)
+        if processed_rows:
+            dfp = pd.DataFrame(processed_rows)
+            self.ds.manifest = pd.merge(self.ds.manifest, dfp, on="sample_id", how="outer", suffixes=("", "_new"))
+            for col in dfp.columns:
+                if col == "sample_id": 
+                    continue
+                cnew = f"{col}_new"
+                if cnew in self.ds.manifest.columns:
+                    self.ds.manifest[col] = self.ds.manifest[cnew].fillna(self.ds.manifest.get(col))
+                    self.ds.manifest.drop(columns=[cnew], inplace=True)
+            self.ds.manifest.to_csv(self.ds.manifest_path, index=False)
+
+        # 기존 split 로직 재사용
+        self._build_ml_dataset()
+        return
 
     def _process_camera(self, img):
         """S3 Logic Porting: Transpose -> Rotate/Scale -> Pad -> Crop"""

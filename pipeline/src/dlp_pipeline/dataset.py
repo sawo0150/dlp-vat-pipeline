@@ -11,7 +11,13 @@ log = logging.getLogger(__name__)
 class DatasetManager:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.root = cfg.paths.dataset_root
+
+        # dataset.source에 따라 root를 선택
+        source = str(getattr(cfg.dataset, "source", "managed")).lower()
+        if source == "raw":
+            self.root = cfg.paths.raw_dataset_root
+        else:
+            self.root = cfg.paths.dataset_root
         self.id = self._determine_id()
         self.path = os.path.join(self.root, self.id)
 
