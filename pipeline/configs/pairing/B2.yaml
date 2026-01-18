@@ -1,0 +1,21 @@
+# configs/pairing/B2.yaml
+
+defaults:
+  - base  # base.yaml의 내용을 상속받음
+
+modes:
+  binary:
+    batches:
+      - id: batch_0000
+        window_index: {start: 1, end: 4998, step: 1}
+        mapping: {offset: 0}
+
+  gray:
+    batches:
+      - id: batch_0000
+        window_index: {start: 1, end: 9998, step: 1}
+        mapping: {offset: 0}
+
+      - id: batch_0001
+        window_index: {start: 1, end: 4998, step: 1}
+        mapping: {offset: 0}

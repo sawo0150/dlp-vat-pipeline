@@ -37,8 +37,8 @@ def main(cfg: DictConfig):
         run_ingest(cfg, ds)
     elif cfg.task.name == "preprocess":
         run_preprocess(cfg, ds)
-    elif cfg.task.name == "pair_gui":
-        run_pair_gui(cfg, ds)
+    elif cfg.task.name == "pair":
+        run_pair(cfg, ds)
     else:
         log.error("Unknown task!")
 
@@ -96,10 +96,10 @@ def run_preprocess(cfg, ds):
     proc = Preprocessor(cfg, ds)
     proc.run()
 
-def run_pair_gui(cfg, ds):
-    log.info("Starting Pair GUI Task...")
-    task = PairGUITask(cfg, ds)
+def run_pair(cfg, ds):
+    log.info("Starting Pair Task (CLI)...")
+    task = PairTask(cfg, ds)
     task.run()
-    
+
 if __name__ == "__main__":
     main()

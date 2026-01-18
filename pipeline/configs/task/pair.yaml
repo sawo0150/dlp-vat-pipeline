@@ -1,27 +1,3 @@
 # configs/task/pair.yaml
 
 name: pair
-
-# gray | binary | both
-mode: gray
-
-# output naming
-process_name: "paired_v1"
-
-# 매칭 입력 방식
-# - linear: w_start~w_end 를 l_start~에 1:1로 선형 매칭
-mapping:
-  type: linear
-
-# paired 폴더에 저장 옵션
-output:
-  # ds.path 아래에 "paired/" 폴더 생성
-  root_dirname: "paired"
-  # light bmp를 png로 변환해서 저장할지
-  convert_light_to_png: true
-  # 기존 파일이 있어도 덮어쓸지
-  overwrite: false
-
-# 매칭 결과 csv 저장
-save_mapping_csv: true
-mapping_dirname: "pairing"     # ds.path/pairing/*.csv 로 저장

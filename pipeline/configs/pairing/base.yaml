@@ -1,0 +1,46 @@
+# configs/pairing/base.yaml
+
+# [Base Config] 모든 페어링 작업의 공통 정책
+policy:
+  copy_mode: hardlink         # copy | hardlink | symlink
+  rename_strategy: stem       # stem | full
+  dry_run: false
+
+  on_missing_window: skip     # skip | error
+  on_missing_ld: skip         # skip | error
+  on_missing_maskmap: skip    # skip | error
+  on_missing_maskfile: skip   # skip | error
+  # [수정] 중복 마스크 허용 (B1 처럼 여러 배치가 같은 마스크를 쓸 때 필수)
+  on_duplicate_mask: allow    # error -> allow
+
+modes:
+  binary:
+    enable: true
+
+    # dataset(Bx) root 기준 상대경로
+    window_root: raw/window_1080p
+    ld_root: raw/light_distribution
+    mask_root: raw/mask_input
+
+    # CSV: window_index -> mask_name을 확정하는 파일
+    csv_path: manifest.csv
+    window_file_col: window_path      # (추가) batch_0000/window0000.png 에서 인덱스 추출
+    mask_name_col: mask_path          # (추가) sample_00000_mask.png
+
+    # 파일명에서 index 파싱용 (폴더 안 파일명 형태에 맞게)
+    index_regex: '(\d+)'
+    # batches는 하위 파일에서 정의함
+  gray:
+    enable: true
+
+    window_root: raw/window_1080p_gray
+    ld_root: raw/light_distribution_gray
+    mask_root: raw/mask_gray
+    gray_meta_root: raw/mask_gray_meta
+
+    csv_path: manifest_gray.csv
+    window_file_col: window_gray_path      # (추가)
+    mask_name_col: mask_gray_path          # (추가)
+
+    index_regex: '(\d+)'
+    # batches는 하위 파일에서 정의함

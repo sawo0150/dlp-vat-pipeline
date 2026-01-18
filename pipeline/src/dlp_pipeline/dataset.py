@@ -2,6 +2,7 @@
 import os
 import pandas as pd
 from datetime import datetime
+import json
 import numpy as np
 from dlp_pipeline.utils import ensure_dir
 import logging
@@ -28,6 +29,7 @@ class DatasetManager:
         self.path = ensure_dir(self.path)
         self.manifest_path = os.path.join(self.path, "manifest.csv")
         
+        # Manifest 로드 (기존 파일이 있으면 읽어옴)
         # [추가] Manifest 로드 (기존 파일이 있으면 읽어옴)
         if os.path.exists(self.manifest_path):
             self.manifest = pd.read_csv(self.manifest_path)
@@ -49,6 +51,16 @@ class DatasetManager:
             "processed": ensure_dir(os.path.join(self.path, "interim", "processed")),
             "debug": ensure_dir(os.path.join(self.path, "interim", "debug")),
             "rig": ensure_dir(os.path.join(self.path, "rig")),
+
+            # [NEW] pairing outputs (raw dataset 정리용)
+            "pairing_root": ensure_dir(os.path.join(self.path, "pairing")),
+            "pair_binary_mask_128": ensure_dir(os.path.join(self.path, "pairing", "binary_mask_128")),
+            "pair_binary_rawld_1600": ensure_dir(os.path.join(self.path, "pairing", "binary_rawLD_1600")),
+            "pair_gray_mask_128": ensure_dir(os.path.join(self.path, "pairing", "gray_mask_128")),
+            "pair_gray_rawld_1600": ensure_dir(os.path.join(self.path, "pairing", "gray_rawLD_1600")),
+            "pair_binary_meta": ensure_dir(os.path.join(self.path, "pairing", "binary_meta")),
+            "pair_gray_meta": ensure_dir(os.path.join(self.path, "pairing", "gray_meta")),
+
         }   
         
         log.info(f"Dataset initialized at: {self.path}")

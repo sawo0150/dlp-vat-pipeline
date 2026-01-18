@@ -23,6 +23,7 @@ defaults:
   - ingest: legacy_val      # 여기서 사용할 ingest 설정을 선택 
                             # (legacy_val | labview)
   - preprocess: standard    # 전처리 파라미터 파일 로드 ( standard )
+  - pairing: base
 
 hydra:
   run:

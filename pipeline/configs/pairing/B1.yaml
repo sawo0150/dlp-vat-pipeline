@@ -1,0 +1,28 @@
+# configs/pairing/B1.yaml
+
+defaults:
+  - base  # base.yaml의 내용을 상속받음
+
+modes:
+  binary:
+    batches:
+      - id: batch_0000
+        window_index: {start: 1, end: 9999, step: 1}
+        mapping: {offset: 0}
+
+  gray:
+    batches:
+      # Gray Batch 0: Window 0 -> LD 1 (Offset +1)
+      - id: batch_0000
+        window_index: {start: 0, end: 9999, step: 1}
+        mapping: {offset: 1}
+      
+      # Gray Batch 1: Window 0 -> LD 0
+      - id: batch_0001
+        window_index: {start: 0, end: 9998, step: 1}
+        mapping: {offset: 0}
+
+      # Gray Batch 2: Window 1 -> LD 1
+      - id: batch_0002
+        window_index: {start: 1, end: 9998, step: 1}
+        mapping: {offset: 0}
