@@ -1,80 +1,64 @@
 # configs/preprocess/standard.yaml
+name: standard
 
-# 1. Camera Image 처리 설정 (S3 Logic)
-camera:
-  target_size: 1280        # 최종 출력 크기
-  
-  # 이미지 방향 보정 옵션 (180도 돌아가면 vflip, hflip 둘 다 true로 해보세요)
-  transpose: false          # 행/열 교환 (MATLAB의 .')
-  vflip: false             # 상하 반전 (Vertical Flip)
-  hflip: false             # 좌우 반전 (Horizontal Flip) - 필요시 true로 변경
-  
-  # Affine Transformation
-  rotation: -1.1           # 각도 (degree)
-  scale: 0.8016            # (8 / 9.98) MATLAB 코드 참조
-  
-  # Padding (MATLAB: padarray)
-  pad_size: 256            # 상하좌우 패딩 픽셀
-  
-  # Crop (MATLAB: imcrop [xmin ymin width height] 1-based)
-  # Python은 0-based이므로 x, y에서 1씩 빼야 함.
-  # 예: MATLAB [267 286 1279 1279] -> Python x=266, y=285, w=1280, h=1280
-  crop:
-    x: 266
-    y: 285
-    w: 1280
-    h: 1280
-    
-# 2. Mask Image 처리 설정 (S4 Logic)
+io:
+  # pairing 폴더를 입력으로 사용
+  input_from: pairing
+  # processed 결과 루트 (DatasetManager가 ds.dirs["processed"]로 이미 만들어둠)
+  processed_subdir: ""   # 보통 빈 문자열(= interim/processed 바로 사용)
+
 mask:
-  target_size: 1280
-  
-  # S4 로직: upscale 후 padding
-  # 128px 입력 기준 설정
-  upscale_factor: 10       # 128 * 10 = 1280 (딱 맞음)
-  padding: 0               # 필요 시 설정
+  pad_total: 32          # 총 패딩(128 -> 160)
+  pad_each: 16           # 자동 계산해도 되지만 명시
+  size_128: 128
+  size_160: 160
+  upsample_factor: 8     # 160*8=1280
+  size_1280: 1280
+  interp: nearest        # mask는 nearest 고정 추천
 
-# 3. ML Dataset Split 설정
-split:
-  train_ratio: 0.8
-  val_ratio: 0.1
-  test_ratio: 0.1
-  shuffle: true
+ld:
+  transpose: true        # MATLAB 로직 반영
+  size_raw: 1600
+  crop_size: 1280
+  warp_interp: linear
+  border_value: 0
 
-# [추가] 4. 출력 폴더/파일 네이밍 설정 (확장성 고려)
-naming:
-  process_name: "standard"        # 이 전처리 설정의 이름 (폴더명에 붙음)
-  input_folder: "digital_mask"    # 기존 A 폴더의 이름 (예: digital_mask)
-  target_folder: "light_dist"     # 기존 B 폴더의 이름 (예: light_dist)
-  descriptive_files: true         # 파일명에 split, type 정보를 포함할지 여부
+registration:
+  # 수동으로 찾은 값을 YAML에 박아 넣을 수도 있고,
+  # interim/processed/registration_params_{mode}.json을 읽어올 수도 있음
+  source: yaml           # yaml | file
+  file_pattern: "interim/processed/registration_params_{mode}.json"
+  params:
+    binary:
+      angle: 1.15
+      scale: 0.8031
+      tx: 56.0
+      ty: 11.0
+    gray:
+      angle: 1.15
+      scale: 0.8031
+      tx: 56.0
+      ty: 11.0
 
-paired:
-  # 어떤 입력을 학습 input으로 쓸지
-  # mask_input: raw/mask_input (128x128)
-  # mask_gray:  raw/mask_gray
-  # window:     raw/window_1080p(_gray)
-  input_source: "mask_gray"
+threshold:
+  enable: true
+  fixed:
+    enable: false
+    values: [30]         # 예: T30만 저장. 여러 개도 가능 [20, 30, 40]
+    prefix: "T"
+  random:
+    enable: true
+    num: 2
+    low: 50
+    high: 80
+    seed: 1234
 
-  # GUI에서 만든 mapping CSV 위치(상대경로는 dataset 폴더 기준)
-  mapping_dir: "pairing"
-  mapping_name: null          # null이면 "최근 mapping" 자동 탐색
+output:
+  save_raw_ld_copy: false     # true면 *_ld_1600_raw에도 저장(복사/링크)
+  raw_ld_copy_mode: "symlink" # copy | hardlink | symlink
+  image_ext: ".png"
 
-  # light가 bmp일 수 있으니 확장자 허용
-  light_exts: [".bmp", ".png"]
-
-  # 정합
-  do_register: true
-  warp_mode: "translation"
-  ecc_iters: 2000
-  ecc_eps: 1e-6
-  gauss_filt: 5
-
-  # 저장 사이즈 (학습용)
-  out_size: [256, 256]
-  crop_roi: null
-  save_debug: true
-
-  # 출력 폴더 네이밍
-  process_name: "paired_v1"
-  input_folder: "digital_mask"
-  target_folder: "light_dist"
+qc:
+  enable: true
+  # QC는 'fixed threshold' 기준으로 IoU/Dice 계산(여러 threshold면 여러 컬럼 생성)
+  metrics: ["iou", "dice", "ncc"]

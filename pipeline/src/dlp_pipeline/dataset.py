@@ -50,6 +50,7 @@ class DatasetManager:
             "camera_raw": ensure_dir(os.path.join(self.path, "raw", "camera_raw")),
             "processed": ensure_dir(os.path.join(self.path, "interim", "processed")),
             "debug": ensure_dir(os.path.join(self.path, "interim", "debug")),
+            "processed_meta": ensure_dir(os.path.join(self.path, "interim", "processed", "meta")),
             "rig": ensure_dir(os.path.join(self.path, "rig")),
 
             # [NEW] pairing outputs (raw dataset 정리용)
@@ -60,6 +61,9 @@ class DatasetManager:
             "pair_gray_rawld_1600": ensure_dir(os.path.join(self.path, "pairing", "gray_rawLD_1600")),
             "pair_binary_meta": ensure_dir(os.path.join(self.path, "pairing", "binary_meta")),
             "pair_gray_meta": ensure_dir(os.path.join(self.path, "pairing", "gray_meta")),
+
+            # convenience
+            "pairs_csv": os.path.join(self.path, "pairing", "pairs.csv"),
 
         }   
         

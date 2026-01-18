@@ -3,6 +3,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import logging
 import os
+import textwrap
 from tqdm import tqdm
 
 from dlp_pipeline.dataset import DatasetManager
@@ -93,6 +94,11 @@ def run_ingest(cfg, ds):
     ingestor.run()
 
 def run_preprocess(cfg, ds):
+    log.info(textwrap.dedent(f"""\
+    Starting Preprocess Task...
+    - dataset_id: {ds.id}
+    - expected input: {os.path.join(ds.path, 'pairing', 'pairs.csv')}
+    """).strip())
     proc = Preprocessor(cfg, ds)
     proc.run()
 

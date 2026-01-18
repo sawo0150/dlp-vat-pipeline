@@ -1,5 +1,4 @@
 # configs/task/preprocess.yaml
 
 name: preprocess
-registration: true
-threshold_mode: random_gray # binary | random_gray (S5 방식)
+# num_images 같은 건 필요 없음. pairs.csv 기반으로 돌기 때문

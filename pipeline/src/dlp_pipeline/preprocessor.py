@@ -1,471 +1,537 @@
 # pipeline/src/dlp_pipeline/preprocessor.py
 
+import os
+import json
+import math
+import shutil
+import logging
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional, Tuple
+
 import cv2
 import numpy as np
-import logging
-import os
-import shutil
-from tqdm import tqdm
 import pandas as pd
+from tqdm import tqdm
+
 from dlp_pipeline.utils import ensure_dir
 
 log = logging.getLogger(__name__)
 
+
+# -----------------------------
+# Small utilities
+# -----------------------------
+def _interp_from_str(s: str) -> int:
+    s = str(s).lower()
+    if s in ("nearest", "nn"):
+        return cv2.INTER_NEAREST
+    if s in ("linear", "bilinear"):
+        return cv2.INTER_LINEAR
+    if s in ("area",):
+        return cv2.INTER_AREA
+    if s in ("cubic", "bicubic"):
+        return cv2.INTER_CUBIC
+    return cv2.INTER_LINEAR
+
+
+def _safe_link_or_copy(src: str, dst: str, mode: str = "copy") -> str:
+    ensure_dir(os.path.dirname(dst))
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return "same"
+    if os.path.exists(dst):
+        os.remove(dst)
+    try:
+        if mode == "hardlink":
+            os.link(src, dst)
+            return "hardlink"
+        if mode == "symlink":
+            os.symlink(src, dst)
+            return "symlink"
+        shutil.copy2(src, dst)
+        return "copy"
+    except Exception as e:
+        log.warning(f"[fallback copy] {e} | {src} -> {dst}")
+        shutil.copy2(src, dst)
+        return "copy"
+
+
+def _imread_gray(path: str) -> np.ndarray:
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Failed to read image: {path}")
+    return img
+
+
+def _write_png(path: str, img: np.ndarray):
+    ensure_dir(os.path.dirname(path))
+    ok = cv2.imwrite(path, img)
+    if not ok:
+        raise IOError(f"Failed to write image: {path}")
+
+
+def _to_uint8(img: np.ndarray) -> np.ndarray:
+    if img.dtype == np.uint8:
+        return img
+    img = np.clip(img, 0, 255)
+    return img.astype(np.uint8)
+
+
+def _binarize(img_u8: np.ndarray, thr: int) -> np.ndarray:
+    _, out = cv2.threshold(img_u8, int(thr), 255, cv2.THRESH_BINARY)
+    return out
+
+
+def _iou(a_bin: np.ndarray, b_bin: np.ndarray) -> float:
+    a = (a_bin > 0)
+    b = (b_bin > 0)
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    return float(inter) / float(union + 1e-9)
+
+
+def _dice(a_bin: np.ndarray, b_bin: np.ndarray) -> float:
+    a = (a_bin > 0)
+    b = (b_bin > 0)
+    inter = np.logical_and(a, b).sum()
+    s = a.sum() + b.sum()
+    return float(2.0 * inter) / float(s + 1e-9)
+
+
+def _ncc(a_u8: np.ndarray, b_u8: np.ndarray) -> float:
+    # normalized cross correlation (Pearson)
+    a = a_u8.astype(np.float32).ravel()
+    b = b_u8.astype(np.float32).ravel()
+    a -= a.mean()
+    b -= b.mean()
+    denom = (a.std() * b.std()) + 1e-9
+    return float((a * b).mean() / denom)
+
+
+# -----------------------------
+# Core transforms (S4 + S3 style)
+# -----------------------------
+def make_mask_160(mask_128: np.ndarray, pad_each: int = 16) -> np.ndarray:
+    # constant 0 padding
+    return cv2.copyMakeBorder(mask_128, pad_each, pad_each, pad_each, pad_each,
+                              borderType=cv2.BORDER_CONSTANT, value=0)
+
+
+def make_mask_1280_from_160(mask_160: np.ndarray, upsample_factor: int = 8, interp=cv2.INTER_NEAREST) -> np.ndarray:
+    # 160 * 8 = 1280
+    return cv2.resize(mask_160, (mask_160.shape[1] * upsample_factor, mask_160.shape[0] * upsample_factor),
+                      interpolation=interp)
+
+
+def align_ld_to_1280(
+    ld_raw: np.ndarray,
+    angle: float,
+    scale: float,
+    tx: float,
+    ty: float,
+    transpose: bool = True,
+    crop_size: int = 1280,
+    warp_interp=cv2.INTER_LINEAR,
+    border_value: int = 0
+) -> np.ndarray:
+    # MATLAB logic: transpose first
+    if transpose:
+        ld_raw = cv2.transpose(ld_raw)
+
+    h, w = ld_raw.shape[:2]
+    center = (w // 2, h // 2)
+
+    M = cv2.getRotationMatrix2D(center, float(angle), float(scale))
+    M[0, 2] += float(tx)
+    M[1, 2] += float(ty)
+
+    warped = cv2.warpAffine(ld_raw, M, (w, h), flags=warp_interp, borderValue=border_value)
+
+    start_x = (w - crop_size) // 2
+    start_y = (h - crop_size) // 2
+
+    # robust crop (pad if needed)
+    if start_x < 0 or start_y < 0:
+        pad_w = max(0, -start_x)
+        pad_h = max(0, -start_y)
+        warped = cv2.copyMakeBorder(warped, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_CONSTANT, value=border_value)
+        start_x += pad_w
+        start_y += pad_h
+
+    cropped = warped[start_y:start_y + crop_size, start_x:start_x + crop_size]
+    return cropped
+
+
+# -----------------------------
+# Preprocessor
+# -----------------------------
+@dataclass
+class SampleResult:
+    dataset_id: str
+    mode: str
+    mask_name: str
+    ld_src_name: str
+    mask_128: str
+    mask_160: str
+    mask_1280: str
+    ld_1280: str
+    thr_outputs: Dict[str, str]
+    meta_path: str
+
+
 class Preprocessor:
-    def __init__(self, cfg, ds_manager):
+    """
+    Input: pairing/pairs.csv
+    Output: interim/processed/{...}
+    """
+
+    def __init__(self, cfg, ds):
         self.cfg = cfg
-        self.ds = ds_manager
-        self.p_cfg = cfg.preprocess # preprocess config shortcut
-        # 네이밍 설정 로드 (없으면 기본값 A/B 사용)
-        self.name_cfg = self.p_cfg.get('naming', {'process_name': 'default', 'input_folder': 'A', 'target_folder': 'B'})
+        self.ds = ds
+
+        self.dataset_id = os.path.basename(ds.path)
+        self.dataset_path = ds.path
+
+        self.processed_root = ds.dirs["processed"]
+        self.meta_root = ds.dirs.get("processed_meta", ensure_dir(os.path.join(self.processed_root, "meta")))
+
+        # load preprocess config block
+        self.pcfg = cfg.preprocess
+
+        # debug controls
+        self.debug_enable = bool(getattr(cfg.debug, "enable", False))
+        self.debug_every = int(getattr(cfg.debug, "sample_every", 50))
+        self.debug_max = int(getattr(cfg.debug, "max_images", 200))
+        self.debug_dir = ds.dirs.get("debug", ensure_dir(os.path.join(ds.path, "interim", "debug")))
+
+        # outputs (strict to your desired structure)
+        self.out_dirs = self._build_output_dirs()
+
+        # pairs csv
+        self.pairs_csv = ds.dirs.get("pairs_csv", os.path.join(ds.path, "pairing", "pairs.csv"))
+
+        # threshold config
+        self.thr_cfg = getattr(self.pcfg, "threshold", None)
+
+        # registration config
+        self.reg_cfg = getattr(self.pcfg, "registration", None)
+
+        # deterministic rng for threshold random
+        seed = int(getattr(getattr(self.pcfg, "threshold", {}), "random", {}).get("seed", getattr(cfg, "seed", 1234))) \
+            if isinstance(getattr(self.pcfg, "threshold", None), (dict,)) else int(getattr(cfg, "seed", 1234))
+        self.rng = np.random.default_rng(seed)
+
+    def _build_output_dirs(self) -> Dict[str, str]:
+        # You specified exact layout; we create them here.
+        od = {}
+        # binary
+        od["binary_mask_128"] = ensure_dir(os.path.join(self.processed_root, "binary_mask_128"))
+        od["binary_mask_160"] = ensure_dir(os.path.join(self.processed_root, "binary_mask_160"))
+        od["binary_mask_1280"] = ensure_dir(os.path.join(self.processed_root, "binary_mask_1280"))
+        od["binary_ld_1600_raw"] = ensure_dir(os.path.join(self.processed_root, "binary_ld_1600_raw"))
+        od["binary_ld_1280_aligned"] = ensure_dir(os.path.join(self.processed_root, "binary_ld_1280_aligned"))
+        # gray
+        od["gray_mask_128"] = ensure_dir(os.path.join(self.processed_root, "gray_mask_128"))
+        od["gray_mask_160"] = ensure_dir(os.path.join(self.processed_root, "gray_mask_160"))
+        od["gray_mask_1280"] = ensure_dir(os.path.join(self.processed_root, "gray_mask_1280"))
+        od["gray_ld_1600_raw"] = ensure_dir(os.path.join(self.processed_root, "gray_ld_1600_raw"))
+        od["gray_ld_1280_aligned"] = ensure_dir(os.path.join(self.processed_root, "gray_ld_1280_aligned"))
+        # threshold roots (created on demand)
+        # meta / index / qc
+        od["meta"] = ensure_dir(os.path.join(self.processed_root, "meta"))
+        return od
+
+    def _load_pairs(self) -> pd.DataFrame:
+        if not os.path.exists(self.pairs_csv):
+            raise FileNotFoundError(f"pairs.csv not found: {self.pairs_csv}")
+        df = pd.read_csv(self.pairs_csv)
+        df = df[(df["status"] == "OK") & (df["mode"].isin(["binary", "gray"]))].reset_index(drop=True)
+        if len(df) == 0:
+            raise ValueError("No OK pairs found.")
+        return df
+
+    def _load_registration_params(self) -> Dict[str, Dict[str, float]]:
+        """
+        returns:
+          {"binary": {"angle":..,"scale":..,"tx":..,"ty":..},
+           "gray":   {...}}
+        """
+        reg = self.reg_cfg
+        if reg is None:
+            raise ValueError("cfg.preprocess.registration is missing")
+
+        source = str(getattr(reg, "source", "yaml")).lower()
+
+        if source == "file":
+            pattern = str(getattr(reg, "file_pattern", "interim/processed/registration_params_{mode}.json"))
+            out = {}
+            for mode in ["binary", "gray"]:
+                fpath = pattern.format(mode=mode)
+                if not os.path.isabs(fpath):
+                    fpath = os.path.join(self.dataset_path, fpath)
+                if not os.path.exists(fpath):
+                    raise FileNotFoundError(f"registration file not found for {mode}: {fpath}")
+                with open(fpath, "r", encoding="utf-8") as f:
+                    obj = json.load(f)
+                # accept both your manual tool format and a plain dict format
+                if "params" in obj:
+                    p = obj["params"]
+                    # manual tool keys
+                    if "rotation_degree" in p:
+                        out[mode] = {
+                            "angle": float(p["rotation_degree"]),
+                            "scale": float(p["scale"]),
+                            "tx": float(p["translation_x"]),
+                            "ty": float(p["translation_y"]),
+                        }
+                    else:
+                        out[mode] = {k: float(v) for k, v in p.items()}
+                else:
+                    out[mode] = {k: float(v) for k, v in obj.items()}
+            return out
+
+        # default: yaml
+        params = getattr(reg, "params", None)
+        if params is None:
+            raise ValueError("registration.source=yaml but registration.params missing")
+        out = {}
+        for mode in ["binary", "gray"]:
+            mp = getattr(params, mode, None)
+            if mp is None:
+                raise ValueError(f"registration.params.{mode} missing")
+            out[mode] = {
+                "angle": float(getattr(mp, "angle")),
+                "scale": float(getattr(mp, "scale")),
+                "tx": float(getattr(mp, "tx")),
+                "ty": float(getattr(mp, "ty")),
+            }
+        return out
+
+    def _debug_should_save(self, k: int, saved: int) -> bool:
+        if not self.debug_enable:
+            return False
+        if saved >= self.debug_max:
+            return False
+        return (k % self.debug_every) == 0
 
     def run(self):
-        log.info("Starting Preprocessing Task...")
-        
-        # [NEW] mapping 기반 pair 전처리 모드
-        if hasattr(self.p_cfg, "paired"):
-            return self._run_paired_light()
-         
-        manifest = self.ds.manifest
-        if manifest.empty:
-            log.error("Manifest is empty!")
-            return
+        df = self._load_pairs()
+        reg_params = self._load_registration_params()
 
-        processed_data = []
-        # 폴더명에 프로세스 이름 반영 (확장성)
-        # 예: interim/processed_standard/digital_mask
-        proc_dir_name = f"processed_{self.name_cfg.get('process_name', 'default')}"
-        base_proc_dir = ensure_dir(os.path.join(self.ds.path, "interim", proc_dir_name))
-
-        # ML 데이터셋 폴더 준비 (interim/processed)
-        dir_input = ensure_dir(os.path.join(base_proc_dir, self.name_cfg['input_folder']))
-        dir_target = ensure_dir(os.path.join(base_proc_dir, self.name_cfg['target_folder']))
-
-        for idx, row in tqdm(manifest.iterrows(), total=len(manifest), desc="Preprocessing"):
-            if pd.isna(row['camera_path']) or pd.isna(row['mask_path']):
-                continue
-
-            sample_id = row['sample_id']
-            
-            # 1. 경로 로드
-            mask_src = os.path.join(self.ds.dirs['mask_input'], row['mask_path'])
-            cam_src = os.path.join(self.ds.dirs['camera_raw'], row['camera_path'])
-
-            # 2. 이미지 로드
-            mask_img = cv2.imread(mask_src, cv2.IMREAD_GRAYSCALE)
-            cam_img = cv2.imread(cam_src, cv2.IMREAD_GRAYSCALE) # 혹은 UNCHANGED
-
-            if mask_img is None or cam_img is None:
-                log.warning(f"Failed to load image for {sample_id}")
-                continue
-
-            # 3. 처리 (Process)
-            # 3-1. Camera Processing (S3 Logic)
-            proc_cam = self._process_camera(cam_img)
-            
-            # 3-2. Mask Processing (S4 Logic + Dynamic Resize)
-            # Manifest에 있는 width 정보를 활용
-            curr_w = row.get('mask_width', 128) # 없으면 기본 128 가정
-            proc_mask = self._process_mask(mask_img, curr_w)
-
-            # 4. 저장 (Save)
-            # 파일명은 간단하게 유지 (중간 산출물이므로)
-            fname = f"{sample_id}.png"
-            cv2.imwrite(os.path.join(dir_input, fname), proc_mask)
-            cv2.imwrite(os.path.join(dir_target, fname), proc_cam)
-
-            processed_data.append({
-                "sample_id": sample_id,
-                # [수정] 저장된 경로 기록 (상대 경로)
-                "processed_input_path": os.path.join(proc_dir_name, self.name_cfg['input_folder'], fname),
-                "processed_target_path": os.path.join(proc_dir_name, self.name_cfg['target_folder'], fname),
-                "pattern_type": row.get('pattern_type', 'unknown') # 나중에 파일명에 쓰기 위해
-            })
-
-        # Manifest 업데이트
-        if processed_data:
-            df_proc = pd.DataFrame(processed_data)
-            
-            # [수정] 중복 컬럼 처리 (Merge 시 _x, _y 발생하는 문제 해결)
-            # df_proc에 있는 컬럼이 manifest에도 있다면, df_proc(새로운 값)을 우선시하기 위한 로직
-            self.ds.manifest = pd.merge(self.ds.manifest, df_proc, on='sample_id', how='left', suffixes=('', '_new'))
-            
-            # _new가 붙은 컬럼이 생겼다면 원본 컬럼을 업데이트하고 _new 삭제
-            for col in df_proc.columns:
-                if col == 'sample_id': continue
-                if f'{col}_new' in self.ds.manifest.columns:
-                    self.ds.manifest[col] = self.ds.manifest[f'{col}_new'].fillna(self.ds.manifest[col])
-                    self.ds.manifest.drop(columns=[f'{col}_new'], inplace=True)            
-
-            self.ds.manifest.to_csv(self.ds.manifest_path, index=False)
-            
-        # 5. ML Dataset Split 실행 (Preprocessing 직후 수행)
-        self._build_ml_dataset()
-
-    # ------------------------------------------------------------------
-    # [NEW] mapping 기반: window(or mask) <-> light_distribution pairing
-    # ------------------------------------------------------------------
-    def _run_paired_light(self):
-        paired = self.p_cfg.paired
-
-        # gray/binary 판별: dataset에 window_1080p_gray가 있으면 gray를 기본으로
-        use_gray = os.path.isdir(self.ds.dirs.get("window_gray", "")) and \
-                   os.path.isdir(os.path.join(self.ds.path, "raw", "light_distribution_gray"))
-
-        win_root = self.ds.dirs["window_gray"] if use_gray else self.ds.dirs["window"]
-        light_root = os.path.join(self.ds.path, "raw", "light_distribution_gray" if use_gray else "light_distribution")
-
-        input_source = str(getattr(paired, "input_source", "mask_gray")).lower()
-        if input_source == "mask_input":
-            in_root = self.ds.dirs["mask_input"]
-        elif input_source == "mask_gray":
-            in_root = self.ds.dirs["mask_gray"]
-        else:
-            in_root = win_root
-
-        mapping_dir = str(getattr(paired, "mapping_dir", "pairing"))
-        mapping_name = getattr(paired, "mapping_name", None)
-        map_root = ensure_dir(os.path.join(self.ds.path, mapping_dir))
-
-        # mapping 자동 선택: 가장 최근 csv
-        if mapping_name is None or str(mapping_name).lower() == "null":
-            cands = [f for f in os.listdir(map_root) if f.endswith(".csv")]
-            if not cands:
-                raise FileNotFoundError(f"No mapping csv in {map_root}. Run task=pair_gui first.")
-            cands = sorted(cands, key=lambda x: os.path.getmtime(os.path.join(map_root, x)), reverse=True)
-            mapping_name = cands[0]
-
-        mapping_path = os.path.join(map_root, str(mapping_name))
-        log.info(f"[paired] using mapping: {mapping_path}")
-
-        df_map = pd.read_csv(mapping_path)
-        if df_map.empty:
-            log.warning("Mapping CSV is empty.")
-            return
-
-        # output dirs
-        process_name = str(getattr(paired, "process_name", "paired"))
-        input_folder = str(getattr(paired, "input_folder", "digital_mask"))
-        target_folder = str(getattr(paired, "target_folder", "light_dist"))
-
-        base_proc_dir = ensure_dir(os.path.join(self.ds.path, "interim", f"processed_{process_name}"))
-        dir_input = ensure_dir(os.path.join(base_proc_dir, input_folder))
-        dir_target = ensure_dir(os.path.join(base_proc_dir, target_folder))
-        dir_debug = self.ds.dirs["debug"]
-
-        # ECC params
-        do_register = bool(getattr(paired, "do_register", True))
-        warp_mode = str(getattr(paired, "warp_mode", "translation")).lower()
-        ecc_iters = int(getattr(paired, "ecc_iters", 2000))
-        ecc_eps = float(getattr(paired, "ecc_eps", 1e-6))
-        gauss = int(getattr(paired, "gauss_filt", 5))
-
-        out_size = tuple(getattr(paired, "out_size", [256, 256]))
-        roi = getattr(paired, "crop_roi", None)
-        save_debug = bool(getattr(paired, "save_debug", True))
-
-        def warp_mode_cv(s: str) -> int:
-            if s == "translation": return cv2.MOTION_TRANSLATION
-            if s == "euclidean": return cv2.MOTION_EUCLIDEAN
-            if s == "affine": return cv2.MOTION_AFFINE
-            if s == "homography": return cv2.MOTION_HOMOGRAPHY
-            return cv2.MOTION_TRANSLATION
-
-        def apply_crop(img, roi_):
-            if roi_ is None: return img
-            x,y,w,h = [int(v) for v in roi_]
-            return img[y:y+h, x:x+w]
-
-        def apply_resize(img, size_):
-            ow, oh = int(size_[0]), int(size_[1])
-            return cv2.resize(img, (ow, oh), interpolation=cv2.INTER_AREA)
-
-        def ecc_align(ref_u8, mov_u8):
-            ref = ref_u8.astype(np.float32) / 255.0
-            mov = mov_u8.astype(np.float32) / 255.0
-            if gauss and gauss > 0:
-                k = gauss if gauss % 2 == 1 else gauss + 1
-                ref = cv2.GaussianBlur(ref, (k,k), 0)
-                mov = cv2.GaussianBlur(mov, (k,k), 0)
-            wm = warp_mode_cv(warp_mode)
-            if wm == cv2.MOTION_HOMOGRAPHY:
-                warp = np.eye(3,3, dtype=np.float32)
-            else:
-                warp = np.eye(2,3, dtype=np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, ecc_iters, ecc_eps)
-            try:
-                cc, warp = cv2.findTransformECC(ref, mov, warp, wm, criteria, None, 1)
-            except cv2.error:
-                return mov_u8, -1.0
-            if wm == cv2.MOTION_HOMOGRAPHY:
-                aligned = cv2.warpPerspective(
-                    mov_u8, warp, (ref_u8.shape[1], ref_u8.shape[0]),
-                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
-                    borderMode=cv2.BORDER_CONSTANT, borderValue=0
-                )
-            else:
-                aligned = cv2.warpAffine(
-                    mov_u8, warp, (ref_u8.shape[1], ref_u8.shape[0]),
-                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
-                    borderMode=cv2.BORDER_CONSTANT, borderValue=0
-                )
-            return aligned, float(cc)
-
-        processed_rows = []
-
-        # mapping CSV 형식: window_file, light_file
-        for _, r in tqdm(df_map.iterrows(), total=len(df_map), desc="Paired preprocess"):
-            wfile = str(r.get("window_file", "")).strip()
-            lfile = str(r.get("light_file", "")).strip()
-            if not wfile or not lfile:
-                continue
-
-            # window_file은 batch 내부 파일명이라고 가정 (GUI 저장 방식)
-            # batch는 window_file에서 유추 불가하므로 mapping_name에 batch를 포함시키는 것을 권장
-            # 여기서는 모든 batch를 스캔하지 않고, "mapping 파일명에 batch_XXXX가 포함"된다고 가정
-            # fallback: window 폴더 전체에서 검색
-            # ---- find window absolute path ----
-            win_abs = None
-            for b in os.scandir(win_root):
-                if not b.is_dir() or not b.name.startswith("batch_"):
-                    continue
-                cand = os.path.join(b.path, wfile)
-                if os.path.exists(cand):
-                    win_abs = cand
-                    batch_name = b.name
-                    break
-            if win_abs is None:
-                log.warning(f"window not found: {wfile}")
-                continue
-
-            # light는 같은 batch 아래에 있다고 가정
-            light_abs = os.path.join(light_root, batch_name, lfile)
-            if not os.path.exists(light_abs):
-                log.warning(f"light not found: {batch_name}/{lfile}")
-                continue
-
-            # input source 로드
-            if input_source == "window":
-                inp_abs = win_abs
-
-            else:
-                # window파일명을 sample_id로 바로 못 바꾸므로, manifest를 통해 window_path->sample_id 매핑이 이상적
-                # 일단: window####.png -> sample_id를 manifest에서 검색 (window_path endswith window####.png)
-                sid = None
-                if os.path.exists(os.path.join(self.ds.path, "manifest_gray.csv")):
-                    dfm = pd.read_csv(os.path.join(self.ds.path, "manifest_gray.csv"))
-                    hit = dfm[dfm.get("window_gray_path","").astype(str).str.endswith(f"{batch_name}/{wfile}")]
-                    if len(hit) > 0:
-                        sid = str(hit.iloc[0]["sample_id"])
-                        gp = str(hit.iloc[0].get("mask_gray_path",""))
-
-                        mp = str(hit.iloc[0].get("mask_path",""))
-                    else:
-                        gp = mp = ""
-
-                else:
-                    dfm = self.ds.manifest
-
-                    hit = dfm[dfm.get("window_path","").astype(str).str.endswith(f"{batch_name}/{wfile}")]
-
-                    if len(hit) > 0:
-                        sid = str(hit.iloc[0]["sample_id"])
-                        mp = str(hit.iloc[0].get("mask_path",""))
-                        gp = ""
-                    else:
-                        gp = mp = ""
-
-                if sid is None:
-                    # fallback: 파일명 기반 sid 생성
-                    sid = os.path.splitext(wfile)[0]
-
-                if input_source == "mask_gray":
-                    if gp:
-                        inp_abs = os.path.join(self.ds.dirs["mask_gray"], gp)
-                    else:
-                        inp_abs = None
-                else:  # mask_input
-                    if mp:
-                        inp_abs = os.path.join(self.ds.dirs["mask_input"], mp)
-                    else:
-                        inp_abs = None
-
-                if inp_abs is None or not os.path.exists(inp_abs):
-                    log.warning(f"input not found for {wfile} (source={input_source})")
-                    continue
-
-            # 이미지 로드
-            inp = cv2.imread(inp_abs, cv2.IMREAD_GRAYSCALE)
-            win = cv2.imread(win_abs, cv2.IMREAD_GRAYSCALE)
-            light = cv2.imread(light_abs, cv2.IMREAD_GRAYSCALE)
-            if inp is None or win is None or light is None:
-                continue
-
-            # 정합은 "window 기준으로 light를 정합"
-            cc = None
-            aligned = light
-            if do_register:
-                aligned, cc = ecc_align(win, light)
-
-            # crop/resize
-            inp2 = apply_resize(apply_crop(inp, roi), out_size)
-            tgt2 = apply_resize(apply_crop(aligned, roi), out_size)
-
-            # 저장
-            # sample id는 window파일명 기반으로 안전하게
-            sid2 = os.path.splitext(wfile)[0]
-            out_in = os.path.join(dir_input, f"{sid2}.png")
-            out_tg = os.path.join(dir_target, f"{sid2}.png")
-            cv2.imwrite(out_in, inp2)
-            cv2.imwrite(out_tg, tgt2)
-
-            if save_debug:
-                try:
-                    overlay = cv2.addWeighted(win, 0.5, aligned, 0.5, 0.0)
-                    cv2.imwrite(os.path.join(dir_debug, f"{sid2}_overlay.png"), overlay)
-                except Exception:
-                    pass
-
-            processed_rows.append({
-                "sample_id": sid2,
-                "paired_window_file": f"{batch_name}/{wfile}",
-                "paired_light_file": f"{batch_name}/{lfile}",
-                "ecc_cc": cc,
-                "processed_input_path": os.path.join(f"processed_{process_name}", input_folder, f"{sid2}.png"),
-                "processed_target_path": os.path.join(f"processed_{process_name}", target_folder, f"{sid2}.png"),
-            })
-
-        # manifest 업데이트 (기본 manifest.csv에 기록)
-        if processed_rows:
-            dfp = pd.DataFrame(processed_rows)
-            self.ds.manifest = pd.merge(self.ds.manifest, dfp, on="sample_id", how="outer", suffixes=("", "_new"))
-            for col in dfp.columns:
-                if col == "sample_id": 
-                    continue
-                cnew = f"{col}_new"
-                if cnew in self.ds.manifest.columns:
-                    self.ds.manifest[col] = self.ds.manifest[cnew].fillna(self.ds.manifest.get(col))
-                    self.ds.manifest.drop(columns=[cnew], inplace=True)
-            self.ds.manifest.to_csv(self.ds.manifest_path, index=False)
-
-        # 기존 split 로직 재사용
-        self._build_ml_dataset()
-        return
-
-    def _process_camera(self, img):
-        """S3 Logic Porting: Transpose -> Rotate/Scale -> Pad -> Crop"""
-        c_cfg = self.p_cfg.camera
-        
-        # 1. Transpose (MATLAB: II.')
-        if c_cfg.transpose:
-            img = cv2.transpose(img)
-            
-        # [추가] Flip Logic (180도 회전 이슈 해결)
-        if c_cfg.vflip:
-            img = cv2.flip(img, 0) # Vertical Flip
-        if c_cfg.hflip:
-            img = cv2.flip(img, 1) # Horizontal Flip
-
-        # 2. Affine (Rotate & Scale)
-        h, w = img.shape[:2]
-        center = (w // 2, h // 2)
-        
-        # OpenCV getRotationMatrix2D는 (Center, Angle, Scale)
-        # Angle: 반시계 방향이 양수. MATLAB -1.1은 시계방향 -> OpenCV 1.1? 확인 필요.
-        # 일단 MATLAB 로직 그대로 적용 시도
-        M = cv2.getRotationMatrix2D(center, c_cfg.rotation, c_cfg.scale)
-        warped = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC)
-
-        # 3. Padding
-        pad = c_cfg.pad_size
-        padded = cv2.copyMakeBorder(warped, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-
-        # 4. Crop
-        cx, cy, cw, ch = c_cfg.crop.x, c_cfg.crop.y, c_cfg.crop.w, c_cfg.crop.h
-        # Boundary Check
-        if cy+ch > padded.shape[0] or cx+cw > padded.shape[1]:
-            log.warning("Crop region out of bounds! Resizing instead.")
-            cropped = cv2.resize(padded, (cw, ch))
-        else:
-            cropped = padded[cy:cy+ch, cx:cx+cw]
-
-        # 5. Final Resize (Optional, 안전장치)
-        if cropped.shape[0] != c_cfg.target_size:
-            cropped = cv2.resize(cropped, (c_cfg.target_size, c_cfg.target_size))
-            
-        return cropped
-
-    def _process_mask(self, img, current_width):
-        """S4 Logic: Upscale/Pad to target size"""
-        m_cfg = self.p_cfg.mask
-        target = m_cfg.target_size # 1280
-        
-        # Case 1: 이미 Target Size (Legacy Data)
-        if current_width == target:
-            return img
-        
-        # Case 2: 작은 마스크 (128 -> 1280)
-        # Nearest Neighbor로 픽셀 깨짐 없이 확대
-        scale = target / current_width
-        
-        # 정수배 확대인지 확인
-        if target % current_width == 0:
-            resized = cv2.resize(img, (target, target), interpolation=cv2.INTER_NEAREST)
-        else:
-            # 정수배가 아니면(예: 64 -> 1280) 일단 확대 후 Padding/Crop 해야함
-            # 여기서는 일단 Resize로 처리
-            resized = cv2.resize(img, (target, target), interpolation=cv2.INTER_NEAREST)
-            
-        return resized
-
-    def _build_ml_dataset(self):
-        """
-        Split Train/Val/Test and organize folders with Descriptive Names
-        """
-        log.info("Building ML Dataset structure...")
-        
-        manifest = self.ds.manifest
-        # 처리된 데이터만 필터링
-        valid_df = manifest.dropna(subset=['processed_input_path'])
-        
-        # Shuffle
-        if self.p_cfg.split.shuffle:
-            valid_df = valid_df.sample(frac=1).reset_index(drop=True)
-            
-        n = len(valid_df)
-        n_train = int(n * self.p_cfg.split.train_ratio)
-        n_val = int(n * self.p_cfg.split.val_ratio)
-        
-        splits = {
-            'train': valid_df.iloc[:n_train],
-            'val': valid_df.iloc[n_train:n_train+n_val],
-            'test': valid_df.iloc[n_train+n_val:]
+        # write final registration_params.json for traceability
+        reg_out = {
+            "dataset_id": self.dataset_id,
+            "created_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "source": str(getattr(self.reg_cfg, "source", "yaml")),
+            "params": reg_params,
         }
+        reg_path = os.path.join(self.processed_root, "registration_params.json")
+        with open(reg_path, "w", encoding="utf-8") as f:
+            json.dump(reg_out, f, ensure_ascii=False, indent=2)
+        log.info(f"[Preprocess] saved: {reg_path}")
+
+        # config values
+        mask_cfg = getattr(self.pcfg, "mask", None)
+        ld_cfg = getattr(self.pcfg, "ld", None)
+        out_cfg = getattr(self.pcfg, "output", None)
+        qc_cfg = getattr(self.pcfg, "qc", None)
+
+        pad_each = int(getattr(mask_cfg, "pad_each", 16))
+        up_factor = int(getattr(mask_cfg, "upsample_factor", 8))
+        mask_interp = _interp_from_str(getattr(mask_cfg, "interp", "nearest"))
+
+        transpose = bool(getattr(ld_cfg, "transpose", True))
+        crop_size = int(getattr(ld_cfg, "crop_size", 1280))
+        warp_interp = _interp_from_str(getattr(ld_cfg, "warp_interp", "linear"))
+        border_value = int(getattr(ld_cfg, "border_value", 0))
+
+        save_raw_ld = bool(getattr(out_cfg, "save_raw_ld_copy", False))
+        raw_ld_mode = str(getattr(out_cfg, "raw_ld_copy_mode", "symlink"))
+        image_ext = str(getattr(out_cfg, "image_ext", ".png"))
+
+        thr_enable = bool(getattr(getattr(self.pcfg, "threshold", None), "enable", False))
+        thr_fixed_enable = bool(getattr(getattr(getattr(self.pcfg, "threshold", None), "fixed", None), "enable", False))
         
-        # [수정] 최종 데이터셋 폴더명에도 프로세스 이름 반영
-        final_folder_name = f"final_dataset_{self.name_cfg.get('process_name', 'standard')}"
-        final_root = ensure_dir(os.path.join(self.ds.path, final_folder_name))        
+        # [FIX] getattr(..., "values")는 DictConfig의 .values() 메서드를 반환하므로 .get() 사용
+        _thr_root = getattr(self.pcfg, "threshold", {}) or {}
+        _fixed_node = getattr(_thr_root, "fixed", {}) or {}
+        thr_values = list(_fixed_node.get("values", [])) if thr_enable else []
 
-        for split_name, df_split in splits.items():
-            # 폴더 생성 (예: final_standard/train/digital_mask)
-            path_in = ensure_dir(os.path.join(final_root, split_name, self.name_cfg['input_folder']))
-            path_out = ensure_dir(os.path.join(final_root, split_name, self.name_cfg['target_folder']))         
+        thr_prefix = str(getattr(getattr(getattr(self.pcfg, "threshold", None), "fixed", None), "prefix", "T"))
+ 
+        thr_rand_enable = bool(getattr(getattr(getattr(self.pcfg, "threshold", None), "random", None), "enable", False))
+        thr_rand_num = int(getattr(getattr(getattr(self.pcfg, "threshold", None), "random", None), "num", 0))
+        thr_rand_low = int(getattr(getattr(getattr(self.pcfg, "threshold", None), "random", None), "low", 10))
+        thr_rand_high = int(getattr(getattr(getattr(self.pcfg, "threshold", None), "random", None), "high", 80))
 
-            for i, row in df_split.iterrows():
-                # [주의] processed_path는 interim 폴더 기준 상대경로임. ds.path와 결합해야 함
-                src_in = os.path.join(self.ds.path, "interim", row['processed_input_path'])
-                src_out = os.path.join(self.ds.path, "interim", row['processed_target_path'])
+        qc_enable = bool(getattr(qc_cfg, "enable", True))
+        qc_metrics = list(getattr(qc_cfg, "metrics", ["iou", "dice", "ncc"]))
 
-                # [추가] 사람이 읽기 편한 파일명 (Config 옵션 확인)
-                if self.name_cfg.get('descriptive_files', False):
-                    # 안전한 접근 (KeyError 방지)
-                    ptype = str(row.get('pattern_type', 'unknown')).replace(" ", "_")
-                    fname = f"{split_name}_{i:04d}_{ptype}.png"
-                else:
-                    fname = f"{row['sample_id']}.png"
-                
-                shutil.copy2(src_in, os.path.join(path_in, fname))
-                shutil.copy2(src_out, os.path.join(path_out, fname))                
+        results: List[SampleResult] = []
+        index_rows: List[dict] = []
+        qc_rows: List[dict] = []
 
-        log.info(f"ML Dataset built at: {final_root}")
-        log.info(f"Counts - Train: {len(splits['train'])}, Val: {len(splits['val'])}, Test: {len(splits['test'])}")
+        debug_saved = 0
+
+        for k in tqdm(range(len(df)), desc="Preprocess"):
+            row = df.iloc[k]
+            mode = str(row["mode"])
+            mask_name = str(row["mask_name"])
+            mask_stem = os.path.splitext(os.path.basename(mask_name))[0]
+
+            # input paths (pairing outputs)
+            pairing_root = os.path.join(self.dataset_path, "pairing")
+            if mode == "binary":
+                in_mask = os.path.join(pairing_root, "binary_mask_128", mask_name)
+                in_ld = self._find_ld_by_stem(os.path.join(pairing_root, "binary_rawLD_1600"), mask_stem, fallback=row.get("src_ld_file", ""))
+            else:
+                in_mask = os.path.join(pairing_root, "gray_mask_128", mask_name)
+                in_ld = self._find_ld_by_stem(os.path.join(pairing_root, "gray_rawLD_1600"), mask_stem, fallback=row.get("src_ld_file", ""))
+
+            # outputs
+            out_mask_128 = os.path.join(self.out_dirs[f"{mode}_mask_128"], f"{mask_stem}{image_ext}")
+            out_mask_160 = os.path.join(self.out_dirs[f"{mode}_mask_160"], f"{mask_stem}{image_ext}")
+            out_mask_1280 = os.path.join(self.out_dirs[f"{mode}_mask_1280"], f"{mask_stem}{image_ext}")
+            out_ld_1280 = os.path.join(self.out_dirs[f"{mode}_ld_1280_aligned"], f"{mask_stem}{image_ext}")
+
+            # optional raw ld copy
+            out_ld_raw = os.path.join(self.out_dirs[f"{mode}_ld_1600_raw"], os.path.basename(in_ld))
+
+            # read
+            mask_128 = _imread_gray(in_mask)
+            ld_1600 = _imread_gray(in_ld)
+
+            # mask derivations
+            mask_160 = make_mask_160(mask_128, pad_each=pad_each)
+            mask_1280 = make_mask_1280_from_160(mask_160, upsample_factor=up_factor, interp=mask_interp)
+
+            # ld align
+            rp = reg_params[mode]
+            ld_1280 = align_ld_to_1280(
+                ld_1600,
+                angle=rp["angle"], scale=rp["scale"], tx=rp["tx"], ty=rp["ty"],
+                transpose=transpose, crop_size=crop_size,
+                warp_interp=warp_interp, border_value=border_value
+            )
+
+            # write outputs
+            _write_png(out_mask_128, _to_uint8(mask_128))
+            _write_png(out_mask_160, _to_uint8(mask_160))
+            _write_png(out_mask_1280, _to_uint8(mask_1280))
+            _write_png(out_ld_1280, _to_uint8(ld_1280))
+            if save_raw_ld:
+                _safe_link_or_copy(in_ld, out_ld_raw, mode=raw_ld_mode)
+
+            # threshold derivations
+            thr_outputs: Dict[str, str] = {}
+            if thr_enable:
+                if thr_fixed_enable:
+                    for t in thr_values:
+                        t = int(t)
+                        thr_dir = ensure_dir(os.path.join(self.processed_root, f"{mode}_thr_1280_{thr_prefix}{t}"))
+                        out_thr = os.path.join(thr_dir, f"{mask_stem}{image_ext}")
+                        thr_img = _binarize(_to_uint8(ld_1280), t)
+                        _write_png(out_thr, thr_img)
+                        thr_outputs[f"{thr_prefix}{t}"] = out_thr
+
+                if thr_rand_enable and thr_rand_num > 0:
+                    thr_dir = ensure_dir(os.path.join(self.processed_root, f"{mode}_thr_1280_random"))
+                    # draw random thresholds
+                    ts = self.rng.integers(low=thr_rand_low, high=thr_rand_high + 1, size=thr_rand_num)
+                    for i, t in enumerate(ts.tolist()):
+                        out_thr = os.path.join(thr_dir, f"{mask_stem}_r{i:02d}_{t}{image_ext}")
+                        thr_img = _binarize(_to_uint8(ld_1280), int(t))
+                        _write_png(out_thr, thr_img)
+                        thr_outputs[f"R{i:02d}_{t}"] = out_thr
+
+            # meta json per sample
+            meta_obj = {
+                "dataset_id": self.dataset_id,
+                "mode": mode,
+                "mask_stem": mask_stem,
+                "inputs": {
+                    "pair_mask_128": in_mask,
+                    "pair_ld_1600": in_ld,
+                },
+                "outputs": {
+                    "mask_128": out_mask_128,
+                    "mask_160": out_mask_160,
+                    "mask_1280": out_mask_1280,
+                    "ld_1280_aligned": out_ld_1280,
+                    "ld_1600_raw_copy": out_ld_raw if save_raw_ld else None,
+                    "thresholds": thr_outputs,
+                },
+                "registration_params": reg_params[mode],
+                "pair_row": {c: (row[c].item() if hasattr(row[c], "item") else row[c]) for c in df.columns},
+            }
+            meta_path = os.path.join(self.out_dirs["meta"], f"{mask_stem}.json")
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_obj, f, ensure_ascii=False, indent=2)
+
+            # qc metrics
+            if qc_enable:
+                qc_row = {
+                    "dataset_id": self.dataset_id,
+                    "mode": mode,
+                    "mask_stem": mask_stem,
+                }
+                # always compute NCC between mask_1280 and aligned ld (as intensity)
+                if "ncc" in qc_metrics:
+                    qc_row["ncc_mask1280_ld1280"] = _ncc(_to_uint8(mask_1280), _to_uint8(ld_1280))
+
+                # IoU/Dice against fixed threshold(s)
+                if thr_enable and thr_fixed_enable and len(thr_values) > 0:
+                    for t in thr_values:
+                        t = int(t)
+                        ld_bin = _binarize(_to_uint8(ld_1280), t)
+                        if "iou" in qc_metrics:
+                            qc_row[f"iou_T{t}"] = _iou(_to_uint8(mask_1280), ld_bin)
+                        if "dice" in qc_metrics:
+                            qc_row[f"dice_T{t}"] = _dice(_to_uint8(mask_1280), ld_bin)
+
+                qc_rows.append(qc_row)
+
+            # index row (global)
+            index_rows.append({
+                "dataset_id": self.dataset_id,
+                "mode": mode,
+                "mask_stem": mask_stem,
+                "mask_128": os.path.relpath(out_mask_128, self.dataset_path),
+                "mask_160": os.path.relpath(out_mask_160, self.dataset_path),
+                "mask_1280": os.path.relpath(out_mask_1280, self.dataset_path),
+                "ld_1280": os.path.relpath(out_ld_1280, self.dataset_path),
+                "meta": os.path.relpath(meta_path, self.dataset_path),
+            })
+
+            # debug samples
+            if self._debug_should_save(k, debug_saved):
+                dbg = ensure_dir(os.path.join(self.debug_dir, "preprocess"))
+                _write_png(os.path.join(dbg, f"{mode}_{mask_stem}_mask1280.png"), _to_uint8(mask_1280))
+                _write_png(os.path.join(dbg, f"{mode}_{mask_stem}_ld1280.png"), _to_uint8(ld_1280))
+                debug_saved += 2
+
+        # write index.csv and qc.csv
+        index_df = pd.DataFrame(index_rows).sort_values(["mode", "mask_stem"], kind="stable").reset_index(drop=True)
+        index_path = os.path.join(self.processed_root, "index.csv")
+        index_df.to_csv(index_path, index=False)
+        log.info(f"[Preprocess] saved: {index_path} ({len(index_df)})")
+
+        if qc_enable and len(qc_rows) > 0:
+            qc_df = pd.DataFrame(qc_rows).sort_values(["mode", "mask_stem"], kind="stable").reset_index(drop=True)
+            qc_path = os.path.join(self.processed_root, "qc.csv")
+            qc_df.to_csv(qc_path, index=False)
+            log.info(f"[Preprocess] saved: {qc_path} ({len(qc_df)})")
+
+        log.info("[Preprocess] Done.")
+
+    def _find_ld_by_stem(self, ld_dir: str, stem: str, fallback: str = "") -> str:
+        # pairing task already tried to name LD as stem.* in many cases.
+        if os.path.isdir(ld_dir):
+            for f in os.listdir(ld_dir):
+                if f.startswith(stem):
+                    return os.path.join(ld_dir, f)
+        # fallback to csv column
+        if fallback:
+            cand = os.path.join(ld_dir, str(fallback))
+            if os.path.exists(cand):
+                return cand
+        raise FileNotFoundError(f"LD file not found for stem={stem} in {ld_dir}")
