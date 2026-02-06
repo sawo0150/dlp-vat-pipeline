@@ -5,7 +5,7 @@ from tqdm import tqdm
 from huggingface_hub import login  # 이 줄 추가
 
 # 여기에 아까 발급받은 토큰(hf_...)을 문자열로 넣으세요
-# login(token="xxxxxxxx")
+# login(token="xxxxxx")
 
 # 저장할 경로 설정
 OUTPUT_DIR = "../processed_imagenet"

@@ -11,13 +11,13 @@ mix:
     imagenet: 0.0
 
 grid:
-  spacing: [ 6, 7, 8, 9, 10, 11, 12]  # [핵심] Spacing 2~6 (High Frequency)
-  thickness: [1,2,3,4]            # 얇은 선 위주 (Thin line)
+  spacing: [ 2, 3, 4, 5, 6, 7]  # [핵심] Spacing 2~6 (High Frequency)
+  thickness: [2,3,4]            # 얇은 선 위주 (Thin line)
   spacing_jitter: 0.20       # 규칙적인 HF 패턴을 위해 지터는 조금 줄임
-  thickness_jitter: 0.3
-  rotate_prob: 0.9          # 회전은 자유롭게
+  thickness_jitter: 0.2
+  rotate_prob: 0.6          # 회전은 자유롭게
   angle: [-35, 35]
-  drop_prob: 0.06            # 끊김 없이 촘촘하게
+  drop_prob: 0.04            # 끊김 없이 촘촘하게
   roi:
     enable_prob: 0.65     # ROI 적용 확률 (높이면 grid가 “부분 영역”에만 나오게 됨)
     num_regions: [1, 3]   # ROI를 구성하는 blob 개수 범위
@@ -26,12 +26,12 @@ grid:
 post:
   invert_prob: 0.05
   morph:
-    enable_prob: 0.10
+    enable_prob: 0.05
     op: ["open", "close", "erode", "dilate"]
     ksize: [1, 2]
     iters: [1, 2]
   filter:
     enable: true
     min_white_ratio: 0.10
-    max_white_ratio: 0.50
+    max_white_ratio: 0.70
     max_retries: 50

@@ -17,7 +17,7 @@ defaults:
   - generator: mix_imagenet  # 마스크 생성기 설정 - mix_default | mix_imagenet
   - graymask: gray_default
   - registration: ecc       # 이미지 정합 방식(예: ECC 기반 registration 등) - 사용/미사용은 코드에 따라
-  - paths: local_Desktop     # 경로 프리셋 선택
+  - paths: local_Desktop    # 경로 프리셋 선택
                             #   - dataset_root 같은 "외부 저장 폴더"를 환경별로 바꾸기 위함
                             #   - 예: lab PC / 개인 노트북 / 서버 등
   - ingest: legacy_val      # 여기서 사용할 ingest 설정을 선택 

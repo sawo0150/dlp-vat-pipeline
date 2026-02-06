@@ -192,6 +192,11 @@ class PackConfig:
     include_thr_fixed: bool
     thr_fixed_values: Optional[List[int]]  # if None and include_thr_fixed: auto-discover
 
+    # ✅ mask-only
+    mask_only: bool
+    mask_subdir: str
+    pad_each: int
+    upsample_factor: int
 
 # -------------------------
 # Core
@@ -335,19 +340,36 @@ def build_pack(cfg: PackConfig) -> str:
     warnings: List[str] = []
 
     for dname in tqdm(cfg.datasets, desc="Datasets", unit="ds"):
+        qc_df = None  # ✅ FIX: avoid UnboundLocalError in mask_only branch
         dataset_path = os.path.join(cfg.src_root, dname)
+        # processed_root는 non-mask_only에서만 의미가 있지만,
+        # 공통 변수로 두되 mask_only에서는 사용하지 않도록 아래에서 가드 처리함.
         processed_root = os.path.join(dataset_path, "interim", "processed")
 
-        index_df = _load_processed_index(dataset_path)
-        qc_df = _load_qc(dataset_path)
+        if cfg.mask_only:
+            # ✅ scan raw masks
+            mask_dir = os.path.join(dataset_path, cfg.mask_subdir)
+            if not os.path.isdir(mask_dir):
+                warnings.append(f"[missing] {dname} mask_only mask_dir not found: {mask_dir}")
+                continue
+            mask_files = sorted([f for f in os.listdir(mask_dir) if f.lower().endswith((".png",".jpg",".jpeg",".bmp",".tif",".tiff"))])
+            if not mask_files:
+                warnings.append(f"[empty] {dname} mask_only no masks in: {mask_dir}")
+                continue
 
-        # merge qc if exists
-        if qc_df is not None:
-            merged = pd.merge(
-                index_df, qc_df, on=["mode", "mask_stem"], how="left", suffixes=("", "_qc")
-            )
+            # create pseudo table similar to index_df with required columns
+            merged = pd.DataFrame({
+                "mode": ["binary"] * len(mask_files),
+                "mask_stem": [os.path.splitext(f)[0] for f in mask_files],
+                "mask_128_path_abs": [os.path.join(mask_dir, f) for f in mask_files],
+            })
         else:
-            merged = index_df.copy()
+            index_df = _load_processed_index(dataset_path)
+            qc_df = _load_qc(dataset_path)
+            if qc_df is not None:
+                merged = pd.merge(index_df, qc_df, on=["mode","mask_stem"], how="left", suffixes=("", "_qc"))
+            else:
+                merged = index_df.copy()
 
         # filter modes
         merged = merged[merged["mode"].isin(cfg.modes)].reset_index(drop=True)
@@ -380,15 +402,19 @@ def build_pack(cfg: PackConfig) -> str:
             mode = str(r["mode"])
             stem = str(r["mask_stem"])
 
-            mask1280_rel = str(r["mask_1280"])
-            ld1280_rel = str(r["ld_1280"])
-
-            mask1280_abs = os.path.join(dataset_path, mask1280_rel)
-            ld1280_abs = os.path.join(dataset_path, ld1280_rel)
-
-            if not os.path.exists(mask1280_abs) or not os.path.exists(ld1280_abs):
-                warnings.append(f"[missing] {dname} {mode} {stem} -> mask/ld not found")
-                continue
+            if cfg.mask_only:
+                mask128_abs = str(r["mask_128_path_abs"])
+                if not os.path.exists(mask128_abs):
+                    warnings.append(f"[missing] {dname} mask_only {stem} -> mask_128 not found")
+                    continue
+            else:
+                mask1280_rel = str(r["mask_1280"])
+                ld1280_rel = str(r["ld_1280"])
+                mask1280_abs = os.path.join(dataset_path, mask1280_rel)
+                ld1280_abs = os.path.join(dataset_path, ld1280_rel)
+                if not os.path.exists(mask1280_abs) or not os.path.exists(ld1280_abs):
+                    warnings.append(f"[missing] {dname} {mode} {stem} -> mask/ld not found")
+                    continue
 
             # output base names
             sample_key = _safe_name(f"{dname}__{mode}__{stem}")
@@ -399,20 +425,51 @@ def build_pack(cfg: PackConfig) -> str:
             out_mask1280_dir = _ensure_dir(os.path.join(img_root, mode, "mask_1280"))
             out_ld1280_dir = _ensure_dir(os.path.join(img_root, mode, "ld_1280_aligned"))
             out_ld1600_dir = _ensure_dir(os.path.join(img_root, mode, "ld_1600_raw"))
-
             out_mask1280 = os.path.join(out_mask1280_dir, f"{sample_key}.png")
             out_ld1280 = os.path.join(out_ld1280_dir, f"{sample_key}.png")
- 
-            # Always materialize aligned 1280 assets (these are the "canonical" pair)
-            if not os.path.exists(out_mask1280):
-                _maybe_resize_or_link(mask1280_abs, out_mask1280, cfg.link_mode, cfg.resize)
-            if not os.path.exists(out_ld1280):
-                _maybe_resize_or_link(ld1280_abs, out_ld1280, cfg.link_mode, cfg.resize)
 
-            # Optional: include mask_128 / mask_160 if present in index.csv
-            out_mask128 = ""
-            out_mask160 = ""
-            if cfg.include_masks_128_160:
+            # ✅ IMPORTANT: out_mask128/out_mask160는 mask_only에서 채운 값을 유지해야 함
+            out_mask128: str = ""
+            out_mask160: str = ""
+ 
+
+            if cfg.mask_only:
+                # ✅ materialize mask_128, mask_160, mask_1280 from raw mask_128
+                out_mask128 = os.path.join(out_mask128_dir, f"{sample_key}.png")
+                if not os.path.exists(out_mask128):
+                    _maybe_resize_or_link(
+                        mask128_abs,
+                        out_mask128,
+                        cfg.link_mode,
+                        1280 if cfg.resize == 1280 else cfg.resize,
+                    )
+                # build 160/1280 (always write, because derived)
+                m128 = _load_image_gray_u8(mask128_abs)
+                # pad to 160
+                m160 = cv2.copyMakeBorder(m128, cfg.pad_each, cfg.pad_each, cfg.pad_each, cfg.pad_each,
+                                          borderType=cv2.BORDER_CONSTANT, value=0)
+                out_mask160 = os.path.join(out_mask160_dir, f"{sample_key}.png")
+                if not os.path.exists(out_mask160):
+                    _write_png(out_mask160, m160)
+                # upsample to 1280
+                m1280 = cv2.resize(m160, (m160.shape[1]*cfg.upsample_factor, m160.shape[0]*cfg.upsample_factor),
+                                   interpolation=cv2.INTER_NEAREST)
+                if not os.path.exists(out_mask1280):
+                    _write_png(out_mask1280, m1280)
+
+                # no LD in mask_only
+                out_ld1280 = ""
+            else:
+                # existing behavior: link/copy canonical mask1280 & ld1280
+                if not os.path.exists(out_mask1280):
+                    _maybe_resize_or_link(mask1280_abs, out_mask1280, cfg.link_mode, cfg.resize)
+                if not os.path.exists(out_ld1280):
+                    _maybe_resize_or_link(ld1280_abs, out_ld1280, cfg.link_mode, cfg.resize)
+
+            # Optional: include mask_128 / mask_160 if present in index.csv (non-mask_only only)
+            # ✅ BUGFIX: mask_only에서 out_mask128/out_mask160를 만들었는데,
+            # 아래에서 다시 ""로 초기화해 manifest가 비어버리던 문제를 제거함.
+            if (not cfg.mask_only) and cfg.include_masks_128_160:
                 if "mask_128" in r and isinstance(r["mask_128"], str) and r["mask_128"].strip():
                     mask128_abs = os.path.join(dataset_path, str(r["mask_128"]))
                     if os.path.exists(mask128_abs):
@@ -428,7 +485,7 @@ def build_pack(cfg: PackConfig) -> str:
 
             # Optional: include raw LD 1600 (stem-prefix match in processed/{mode}_ld_1600_raw)
             out_ld1600 = ""
-            if cfg.include_raw_ld_1600:
+            if (not cfg.mask_only) and cfg.include_raw_ld_1600:
                 raw_dir = os.path.join(processed_root, f"{mode}_ld_1600_raw")
                 raw_abs = _find_file_by_stem_prefix(raw_dir, stem)
                 if raw_abs and os.path.exists(raw_abs):
@@ -439,7 +496,7 @@ def build_pack(cfg: PackConfig) -> str:
  
             # meta (optional)
             out_meta = ""
-            if cfg.include_meta and "meta" in r and isinstance(r["meta"], str) and r["meta"].strip():
+            if (not cfg.mask_only) and cfg.include_meta and "meta" in r and isinstance(r["meta"], str) and r["meta"].strip():
                 meta_abs = os.path.join(dataset_path, str(r["meta"]))
                 if os.path.exists(meta_abs):
                     out_meta = os.path.join(meta_root, f"{sample_key}.json")
@@ -449,7 +506,7 @@ def build_pack(cfg: PackConfig) -> str:
             # -------- thresholds: materialize ALL that exist (random + fixed) --------
             thr_random_dir_rel = ""
             thr_random_count = 0
-            if cfg.include_thr_random:
+            if (not cfg.mask_only) and cfg.include_thr_random:
                 thr_list = _collect_thr_random(processed_root, mode, stem)
                 if thr_list:
                     out_thr_dir = _ensure_dir(os.path.join(thr_root, mode, "random"))
@@ -466,7 +523,7 @@ def build_pack(cfg: PackConfig) -> str:
                     thr_random_dir_rel = _relpath(out_thr_dir, pack_root)
 
             thr_fixed_map: Dict[str, str] = {}
-            if cfg.include_thr_fixed:
+            if (not cfg.mask_only) and cfg.include_thr_fixed:
                 values = cfg.thr_fixed_values
                 if values is None:
                     values = _discover_thr_fixed_values(processed_root, mode, prefix="T")
@@ -491,7 +548,7 @@ def build_pack(cfg: PackConfig) -> str:
                     qc_cols[f"qc__{c}"] = "" if pd.isna(v) else str(v)
 
             # unified availability flags
-            has_fwd = int(bool(out_mask1280) and bool(out_ld1280))
+            has_fwd = int(bool(out_mask1280) and bool(out_ld1280)) if not cfg.mask_only else 0
             has_inv_random = int(thr_random_count > 0)
             has_inv_fixed = int(len(thr_fixed_map) > 0)
 
@@ -504,7 +561,7 @@ def build_pack(cfg: PackConfig) -> str:
                 "mask_128_path": _relpath(out_mask128, pack_root) if out_mask128 else "",
                 "mask_160_path": _relpath(out_mask160, pack_root) if out_mask160 else "",
                 "mask_1280_path": _relpath(out_mask1280, pack_root),
-                "ld_1280_aligned_path": _relpath(out_ld1280, pack_root),
+                "ld_1280_aligned_path": _relpath(out_ld1280, pack_root) if out_ld1280 else "",
                 "ld_1600_raw_path": _relpath(out_ld1600, pack_root) if out_ld1600 else "",
                 "thr_random_dir": thr_random_dir_rel,
                 "thr_random_count": str(thr_random_count),
@@ -629,6 +686,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--thr_fixed", default="auto",
                    help="Include fixed thresholds if present. 'auto' to discover, or comma list like '30,40', or 'none'")
  
+    # ✅ NEW: mask-only pack
+    p.add_argument("--mask_only", action="store_true",
+                   help="Build pack from raw binary masks only (no LD/index.csv required).")
+    p.add_argument("--mask_subdir", default="mask_input",
+                   help="If --mask_only: subdir under each dataset that contains binary masks (e.g., mask_input).")
     return p.parse_args()
 
 
@@ -697,6 +759,11 @@ def main():
         include_thr_random=not bool(args.no_thr_random),
         include_thr_fixed=bool(include_thr_fixed),
         thr_fixed_values=thr_fixed_values,
+
+        mask_only=bool(args.mask_only),
+        mask_subdir=str(args.mask_subdir),
+        pad_each=16,
+        upsample_factor=8,
     )
 
     out = build_pack(cfg)

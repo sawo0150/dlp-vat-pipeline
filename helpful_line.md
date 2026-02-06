@@ -60,3 +60,38 @@ python tools/extract_trainpack.py \
   --link_mode copy \
   --include_meta \
   --thr_fixed auto
+
+- binarypack
+python tools/extract_trainpack.py \
+  --src_root ~/Desktop/26-1_UROP/raw_binay_datasets \
+  --datasets all \
+  --dst_root ~/Desktop/trainpacks \
+  --pack_name TrainPack_binary_maskonly_COPY \
+  --modes binary \
+  --split 0.9,0.05,0.05 \
+  --seed 1234 \
+  --link_mode copy \
+  --include_meta \
+  --mask_only \
+  --mask_subdir raw/mask_input \
+  --no_raw_ld_1600 \
+  --no_thr_random \
+  --thr_fixed none
+
+python tools/extract_trainpack.py \
+  --src_root ~/Desktop/26-1_UROP/raw_binay_datasets \
+  --datasets all \
+  --dst_root ~/Desktop/trainpacks \
+  --pack_name MiniPack_binary_maskonly_COPY \
+  --modes binary \
+  --split 0.9,0.05,0.05 \
+  --seed 1234 \
+  --link_mode copy \
+  --include_meta \
+  --mask_only \
+  --mask_subdir raw/mask_input \
+  --mini \
+  --max_per_dataset 200 \
+  --no_raw_ld_1600 \
+  --no_thr_random \
+  --thr_fixed none
