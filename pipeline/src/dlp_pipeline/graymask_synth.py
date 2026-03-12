@@ -432,7 +432,9 @@ class GrayMaskSynthesizer:
 
         # logistic ramp: inside(neg sdf) -> 255
         x = (-(sdf - bias)) / max(1e-6, slope)
-        ramp = 1.0 / (1.0 + np.exp(-x))
+        # x값이 너무 작거나 커지는 것을 방지 (-500 ~ 500 사이로 제한)
+        x_safe = np.clip(x, -500.0, 500.0) 
+        ramp = 1.0 / (1.0 + np.exp(-x_safe))
         target = 255.0 * ramp
 
         out = gray.copy()

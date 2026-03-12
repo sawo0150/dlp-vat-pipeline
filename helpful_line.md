@@ -17,19 +17,22 @@ pip install -e ./common
 pip install -e ./ml
 pip install -e ./pipeline
 
-conda activate dlp
-conda deactivate
-
-비활성화
-- deactivate
-
 (중요) 한 venv에서 “pipeline+ml+common” editable 설치하기
 source .venv/bin/activate
 pip install -e ./common
 pip install -e ./pipeline
 pip install -e ./ml
 
+
 ./scripts/run_pipeline.sh
+
+
+conda activate dlp
+conda deactivate
+
+비활성화
+- deactivate
+
 
 python manual_alignment_pygame_v2.py --dataset /home/swpants05/Desktop/26-1_UROP/raw_datasets/B2_Grid_hf --mode binary
 

@@ -1,0 +1,20 @@
+name: dlp
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - pyyaml
+  - tqdm
+  - pillow
+  - scikit-image
+  - matplotlib
+  - pydantic
+  - pip
+  - pip:
+    - opencv-python
+    - hydra-core
+    - omegaconf
+    - natsort

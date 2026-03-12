@@ -1,3 +1,7 @@
-# [Default] 사용자 홈 디렉토리 기준
-dataset_root: ${oc.env:HOME}/dlp_datasets
+# configs/paths/default.yaml
+
+# [UROP Desktop] 프로젝트 폴더 내부 경로 지정
+# ${hydra:runtime.cwd}는 스크립트를 실행한 프로젝트 루트 경로를 자동으로 가져옵니다.
+dataset_root: ${hydra:runtime.cwd}/../data/dlp_datasets
+raw_dataset_root: ${hydra:runtime.cwd}/../data/binary_datasets
 experiment_inbox: null

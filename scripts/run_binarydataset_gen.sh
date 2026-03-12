@@ -13,7 +13,7 @@ export PYTHONPATH="$PROJECT_ROOT/pipeline/src:$PYTHONPATH"
 # 2. SCALE 설정 (기본값: 1000 -> 총 30k 생성)
 # 실행 시 인자로 전달 가능 예: ./run_dataset_gen.sh 1000
 if [ -z "$1" ]; then
-    SCALE=4000
+    SCALE=1000
 else
     SCALE=$1
 fi
